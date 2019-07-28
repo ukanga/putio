@@ -178,6 +178,12 @@ pub fn run(config: Config) -> Result<(), Box<dyn Error>> {
                 } else {
                     delete_file(&client, file.id).unwrap();
                 }
+                let completed_dir = Path::new("completed");
+                if !completed_dir.is_dir() {
+                    fs::create_dir(completed_dir).unwrap();
+                }
+                let completed_path = completed_dir.join(String::from(format!("{}", file.name)));
+                fs::rename(file.name, completed_path).unwrap();
             }
         }
     }
