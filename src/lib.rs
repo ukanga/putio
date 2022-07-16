@@ -43,15 +43,15 @@ impl Client {
         Client { oauth_token }
     }
 
-    pub fn get(&self, url: &String) -> Result<reqwest::RequestBuilder, Box<dyn Error>> {
-        let client = reqwest::Client::new();
+    pub fn get(&self, url: &String) -> Result<reqwest::blocking::RequestBuilder, Box<dyn Error>> {
+        let client = reqwest::blocking::Client::new();
         let headers = get_authorization_header(&self.oauth_token);
 
         Ok(client.get(url).headers(headers))
     }
 
-    pub fn post(&self, url: &String) -> Result<reqwest::RequestBuilder, Box<dyn Error>> {
-        let client = reqwest::Client::new();
+    pub fn post(&self, url: &String) -> Result<reqwest::blocking::RequestBuilder, Box<dyn Error>> {
+        let client = reqwest::blocking::Client::new();
         let headers = get_authorization_header(&self.oauth_token);
 
         Ok(client.post(url).headers(headers))
