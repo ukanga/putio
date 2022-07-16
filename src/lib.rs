@@ -7,6 +7,7 @@ use serde_json::json;
 use std::error::Error;
 use std::fs;
 use std::io;
+use std::io::Write;
 use std::path::Path;
 
 // #[derive(Debug)]
@@ -162,7 +163,8 @@ fn file_url(client: &Client, file_id: i64) -> Result<String, Box<dyn Error>> {
 }
 
 pub fn run(config: Config) -> Result<(), Box<dyn Error>> {
-    // let files: Files = serde_json::from_str(data)?;
+    let stdout = io::stdout();
+    let mut handle = stdout.lock();
     let path = Path::new(".");
     let downloaded_files = list_dir(&path).unwrap();
     let client = Client::new(&config.oauth_token);
@@ -171,7 +173,7 @@ pub fn run(config: Config) -> Result<(), Box<dyn Error>> {
         if file.file_type == "VIDEO" {
             let download_url = file_url(&client, file.id).unwrap();
             if downloaded_files.iter().find(|&x| x == &file.name) == None {
-                println!("{}", download_url);
+                writeln!(handle, "{}", download_url)?;
             } else {
                 if file.parent_id != config.parent_id {
                     delete_file(&client, file.parent_id).unwrap();
