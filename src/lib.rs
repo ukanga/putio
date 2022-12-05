@@ -14,6 +14,7 @@ use std::path::Path;
 pub struct Config {
     oauth_token: String,
     parent_id: i64,
+    max_display: Option<u32>,
 }
 
 impl Config {
@@ -24,10 +25,15 @@ impl Config {
 
         let oauth_token = args[1].clone();
         let parent_id: i64 = args[2].parse::<i64>().unwrap();
+        let mut max_display: Option<u32> = None;
+        if args.len() == 4 {
+            max_display = Some(args[3].parse::<u32>().unwrap());
+        }
 
         Ok(Config {
             oauth_token,
             parent_id,
+            max_display,
         })
     }
 }
@@ -169,13 +175,17 @@ pub fn run(config: Config) -> Result<(), Box<dyn Error>> {
     let downloaded_files = list_dir(&path).unwrap();
     let client = Client::new(&config.oauth_token);
     let files = files_list(&client, config.parent_id).unwrap();
+    let mut num_ouputted: u32 = 0;
     for file in files {
         if file.file_type == "VIDEO" {
             let download_url = file_url(&client, file.id).unwrap();
             if downloaded_files.iter().find(|&x| x == &file.name) == None {
-                writeln!(handle, "{}", download_url)?;
+                if config.max_display.is_none() || num_ouputted < config.max_display.unwrap() {
+                    num_ouputted += 1;
+                    writeln!(handle, "{}", download_url)?;
+                }
             } else {
-                if file.parent_id != config.parent_id {
+                if file.parent_id != config.parent_id && parent_safe_to_delete(&client, &file) {
                     delete_file(&client, file.parent_id).unwrap();
                 } else {
                     delete_file(&client, file.id).unwrap();
@@ -191,6 +201,16 @@ pub fn run(config: Config) -> Result<(), Box<dyn Error>> {
     }
 
     Ok(())
+}
+
+fn parent_safe_to_delete(client: &Client, file: &File) -> bool {
+    let files = files_list(&client, file.parent_id).unwrap();
+    for file_in_dir in files {
+        if file_in_dir.file_type == "VIDEO" && file_in_dir.id != file.id {
+            return false;
+        }
+    }
+    true
 }
 
 #[cfg(test)]
