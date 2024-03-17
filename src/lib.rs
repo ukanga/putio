@@ -5,10 +5,21 @@ extern crate serde_json;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::error::Error;
+use std::fmt;
 use std::fs;
 use std::io;
 use std::io::Write;
 use std::path::Path;
+
+#[derive(Debug)]
+struct PutioError(String);
+
+impl fmt::Display for PutioError {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(f, "putio error: {}", self.0)
+    }
+}
+impl Error for PutioError {}
 
 // #[derive(Debug)]
 pub struct Config {
@@ -166,9 +177,15 @@ fn files_list(client: &Client, parent_id: i64) -> Result<Vec<File>, Box<dyn Erro
 
 fn file_url(client: &Client, file_id: i64) -> Result<String, Box<dyn Error>> {
     let url = format!("https://api.put.io/v2/files/{}/url", file_id);
-    let response: FileURL = client.get(&url).unwrap().send()?.json()?;
-
-    Ok(response.url)
+    let response = client.get(&url).unwrap().send()?;
+    if response.status().is_success() {
+        let file_url: FileURL = response.json()?;
+        Ok(file_url.url)
+    } else {
+        return Err(Box::new(PutioError(
+            "Error fetching file download url.".into(),
+        )));
+    }
 }
 
 pub fn run(config: Config) -> Result<(), Box<dyn Error>> {
