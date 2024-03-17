@@ -145,16 +145,19 @@ fn delete_file(client: &Client, file_id: i64) -> Result<(), Box<dyn Error>> {
 
 fn files_list(client: &Client, parent_id: i64) -> Result<Vec<File>, Box<dyn Error>> {
     let url = format!("https://api.put.io/v2/files/list?parent_id={}", parent_id);
-    let response: Files = client.get(&url).unwrap().send()?.json()?;
+    let response = client.get(&url).unwrap().send()?;
     let mut files: Vec<File> = Vec::new();
-    for file in response.files {
-        if file.file_type == "FOLDER" {
-            let folder = files_list(&client, file.id).unwrap();
-            for f in folder {
-                files.push(f);
+    if response.status().is_success() {
+        let response_files: Files = response.json()?;
+        for file in response_files.files {
+            if file.file_type == "FOLDER" {
+                let folder = files_list(&client, file.id).unwrap();
+                for f in folder {
+                    files.push(f);
+                }
+            } else {
+                files.push(file);
             }
-        } else {
-            files.push(file);
         }
     }
 
