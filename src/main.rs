@@ -11,7 +11,7 @@ fn main() -> Result<()> {
 
     let config = Config::new(&args).unwrap_or_else(|err| {
         let mut handle = stdout.lock();
-        writeln!(handle, "\r\nProblems parsing arguments: {}\r\n", err).unwrap();
+        writeln!(handle, "\r\nProblem parsing arguments: {}\r\n", err).unwrap();
         process::exit(1);
     });
 

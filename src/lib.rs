@@ -26,6 +26,7 @@ pub struct Config {
     oauth_token: String,
     parent_id: i64,
     max_display: Option<u32>,
+    per_page: i8,
 }
 
 impl Config {
@@ -37,14 +38,19 @@ impl Config {
         let oauth_token = args[1].clone();
         let parent_id: i64 = args[2].parse::<i64>().unwrap();
         let mut max_display: Option<u32> = None;
-        if args.len() == 4 {
+        let mut per_page = 1;
+        if args.len() >= 4 {
             max_display = Some(args[3].parse::<u32>().unwrap());
+        }
+        if args.len() >= 5 {
+            per_page = args[4].parse::<i8>().unwrap();
         }
 
         Ok(Config {
             oauth_token,
             parent_id,
             max_display,
+            per_page,
         })
     }
 }
@@ -154,15 +160,18 @@ fn delete_file(client: &Client, file_id: i64) -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
-fn files_list(client: &Client, parent_id: i64) -> Result<Vec<File>, Box<dyn Error>> {
-    let url = format!("https://api.put.io/v2/files/list?parent_id={}", parent_id);
+fn files_list(client: &Client, parent_id: i64, per_page: i8) -> Result<Vec<File>, Box<dyn Error>> {
+    let url = format!(
+        "https://api.put.io/v2/files/list?parent_id={}&per_page={}",
+        parent_id, per_page
+    );
     let response = client.get(&url).unwrap().send()?;
     let mut files: Vec<File> = Vec::new();
     if response.status().is_success() {
         let response_files: Files = response.json()?;
         for file in response_files.files {
             if file.file_type == "FOLDER" {
-                let folder = files_list(&client, file.id).unwrap();
+                let folder = files_list(&client, file.id, per_page).unwrap();
                 for f in folder {
                     files.push(f);
                 }
@@ -194,7 +203,7 @@ pub fn run(config: Config) -> Result<(), Box<dyn Error>> {
     let path = Path::new(".");
     let downloaded_files = list_dir(&path).unwrap();
     let client = Client::new(&config.oauth_token);
-    let files = files_list(&client, config.parent_id).unwrap();
+    let files = files_list(&client, config.parent_id, config.per_page).unwrap();
     let mut num_ouputted: u32 = 0;
     for file in files {
         if file.file_type == "VIDEO" {
@@ -205,7 +214,9 @@ pub fn run(config: Config) -> Result<(), Box<dyn Error>> {
                     writeln!(handle, "{}", download_url)?;
                 }
             } else {
-                if file.parent_id != config.parent_id && parent_safe_to_delete(&client, &file) {
+                if file.parent_id != config.parent_id
+                    && parent_safe_to_delete(&client, &file, config.per_page)
+                {
                     delete_file(&client, file.parent_id).unwrap();
                 } else {
                     delete_file(&client, file.id).unwrap();
@@ -223,8 +234,8 @@ pub fn run(config: Config) -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
-fn parent_safe_to_delete(client: &Client, file: &File) -> bool {
-    let files = files_list(&client, file.parent_id).unwrap();
+fn parent_safe_to_delete(client: &Client, file: &File, per_page: i8) -> bool {
+    let files = files_list(&client, file.parent_id, per_page).unwrap();
     for file_in_dir in files {
         if file_in_dir.file_type == "VIDEO" && file_in_dir.id != file.id {
             return false;
