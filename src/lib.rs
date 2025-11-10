@@ -214,12 +214,21 @@ pub fn run(config: Config) -> Result<(), Box<dyn Error>> {
                     writeln!(handle, "{}", download_url)?;
                 }
             } else {
+                // Delete the file first
+                eprintln!(
+                    "DEBUG: Deleting file with ID: {} (file: {})",
+                    file.id, file.name
+                );
+                delete_file(&client, file.id).unwrap();
+                // Check if the parent can now be deleted
                 if file.parent_id != config.parent_id
                     && parent_safe_to_delete(&client, &file, config.per_page)
                 {
+                    eprintln!(
+                        "DEBUG: Deleting parent directory with ID: {} (file: {})",
+                        file.parent_id, file.name
+                    );
                     delete_file(&client, file.parent_id).unwrap();
-                } else {
-                    delete_file(&client, file.id).unwrap();
                 }
                 let completed_dir = Path::new("completed");
                 if !completed_dir.is_dir() {
@@ -229,18 +238,50 @@ pub fn run(config: Config) -> Result<(), Box<dyn Error>> {
                 fs::rename(file.name, completed_path).unwrap();
             }
         }
+
+        else if file.file_type == "ARCHIVE" {
+            // Not downloading any archive files 
+            eprintln!(
+                "DEBUG: Deleting file with ID: {} (file: {})",
+                file.id, file.name
+            );
+            delete_file(&client, file.id).unwrap();
+        }
+        else {
+            eprintln!(
+                "DEBUG: Found this other file {} of type {}",
+                file.name, file.file_type
+            );
+        }
     }
 
     Ok(())
 }
 
 fn parent_safe_to_delete(client: &Client, file: &File, per_page: i8) -> bool {
+    eprintln!(
+        "DEBUG: Checking if parent {} is safe to delete (file: {})",
+        file.parent_id, file.name
+    );
     let files = files_list(&client, file.parent_id, per_page).unwrap();
+    eprintln!(
+        "DEBUG: Found {} total files in parent directory",
+        files.len()
+    );
     for file_in_dir in files {
+        eprintln!(
+            "DEBUG:   Checking file: {} (type: {}, id: {})",
+            file_in_dir.name, file_in_dir.file_type, file_in_dir.id
+        );
         if file_in_dir.file_type == "VIDEO" && file_in_dir.id != file.id {
+            eprintln!(
+                "DEBUG: Another VIDEO found ({}), parent NOT safe to delete",
+                file_in_dir.name
+            );
             return false;
         }
     }
+    eprintln!("DEBUG: No other videos in parent, parent IS safe to delete");
     true
 }
 
