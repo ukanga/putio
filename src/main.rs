@@ -6,6 +6,7 @@ use putio::run;
 use putio::Config;
 
 fn main() -> Result<()> {
+    env_logger::init();
     let args: Vec<String> = env::args().collect();
     let stdout = io::stdout();
 
