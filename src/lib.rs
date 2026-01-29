@@ -166,10 +166,12 @@ fn files_list(client: &Client, parent_id: i64, per_page: i8) -> Result<Vec<File>
         "https://api.put.io/v2/files/list?parent_id={}&per_page={}",
         parent_id, per_page
     );
+    debug!("Listing files for parent_id={} per_page={}", parent_id, per_page);
     let response = client.get(&url).unwrap().send()?;
     let mut files: Vec<File> = Vec::new();
     if response.status().is_success() {
         let response_files: Files = response.json()?;
+        debug!("Got {} files (status: {})", response_files.files.len(), response_files.status);
         for file in response_files.files {
             if file.file_type == "FOLDER" {
                 let folder = files_list(&client, file.id, per_page).unwrap();
@@ -187,9 +189,11 @@ fn files_list(client: &Client, parent_id: i64, per_page: i8) -> Result<Vec<File>
 
 fn file_url(client: &Client, file_id: i64) -> Result<String, Box<dyn Error>> {
     let url = format!("https://api.put.io/v2/files/{}/url", file_id);
+    debug!("Fetching download URL for file_id={}", file_id);
     let response = client.get(&url).unwrap().send()?;
     if response.status().is_success() {
         let file_url: FileURL = response.json()?;
+        debug!("Got download URL for file_id={}", file_id);
         Ok(file_url.url)
     } else {
         return Err(Box::new(PutioError(
@@ -205,8 +209,10 @@ pub fn run(config: Config) -> Result<(), Box<dyn Error>> {
     let downloaded_files = list_dir(&path).unwrap();
     let client = Client::new(&config.oauth_token);
     let files = files_list(&client, config.parent_id, config.per_page).unwrap();
+    debug!("Total files to process: {}", files.len());
     let mut num_ouputted: u32 = 0;
     for file in files {
+        debug!("Processing file: {} (type: {}, id: {})", file.name, file.file_type, file.id);
         if file.file_type == "VIDEO" {
             let download_url = file_url(&client, file.id).unwrap();
             if downloaded_files.iter().find(|&x| x == &file.name) == None {
