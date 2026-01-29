@@ -175,12 +175,19 @@ fn files_list(client: &Client, parent_id: i64, per_page: i8) -> Result<Vec<File>
         "https://api.put.io/v2/files/list?parent_id={}&per_page={}",
         parent_id, per_page
     );
-    debug!("Listing files for parent_id={} per_page={}", parent_id, per_page);
+    debug!(
+        "Listing files for parent_id={} per_page={}",
+        parent_id, per_page
+    );
     let response = client.get(&url).unwrap().send()?;
     let mut files: Vec<File> = Vec::new();
     if response.status().is_success() {
         let response_files: Files = response.json()?;
-        debug!("Got {} files (status: {})", response_files.files.len(), response_files.status);
+        debug!(
+            "Got {} files (status: {})",
+            response_files.files.len(),
+            response_files.status
+        );
         for file in response_files.files {
             if file.file_type == "FOLDER" {
                 let folder = files_list(&client, file.id, per_page).unwrap();
@@ -192,7 +199,11 @@ fn files_list(client: &Client, parent_id: i64, per_page: i8) -> Result<Vec<File>
             }
         }
     } else {
-        debug!("files_list failed for parent_id={}: HTTP {}", parent_id, response.status());
+        debug!(
+            "files_list failed for parent_id={}: HTTP {}",
+            parent_id,
+            response.status()
+        );
     }
 
     Ok(files)
@@ -207,11 +218,20 @@ fn file_url(client: &Client, file_id: i64) -> Result<String, Box<dyn Error>> {
         debug!("Got download URL for file_id={}", file_id);
         Ok(file_url.url)
     } else {
-        debug!("file_url failed for file_id={}: HTTP {}", file_id, response.status());
+        debug!(
+            "file_url failed for file_id={}: HTTP {}",
+            file_id,
+            response.status()
+        );
         return Err(Box::new(PutioError(
             "Error fetching file download url.".into(),
         )));
     }
+}
+
+fn is_unwanted_file(name: &str) -> bool {
+    let name_lower = name.to_lowercase();
+    name_lower.ends_with(".exe") || name_lower.ends_with(".nfo") || name_lower.ends_with(".txt")
 }
 
 pub fn run(config: Config) -> Result<(), Box<dyn Error>> {
@@ -220,49 +240,65 @@ pub fn run(config: Config) -> Result<(), Box<dyn Error>> {
     let path = Path::new(".");
     let downloaded_files = list_dir(&path).unwrap();
     let client = Client::new(&config.oauth_token);
-    let files = files_list(&client, config.parent_id, config.per_page).unwrap();
-    debug!("Total files to process: {}", files.len());
-    let mut num_ouputted: u32 = 0;
-    for file in files {
-        debug!("Processing file: {} (type: {}, id: {})", file.name, file.file_type, file.id);
-        if file.file_type == "VIDEO" {
-            let download_url = file_url(&client, file.id).unwrap();
-            if downloaded_files.iter().find(|&x| x == &file.name) == None {
-                if config.max_display.is_none() || num_ouputted < config.max_display.unwrap() {
-                    num_ouputted += 1;
-                    writeln!(handle, "{}", download_url)?;
+
+    loop {
+        let files = files_list(&client, config.parent_id, config.per_page).unwrap();
+        debug!("Total files to process: {}", files.len());
+        let mut num_ouputted: u32 = 0;
+        let mut unwanted_deleted: u32 = 0;
+
+        for file in files {
+            debug!(
+                "Processing file: {} (type: {}, id: {})",
+                file.name, file.file_type, file.id
+            );
+            if file.file_type == "VIDEO" {
+                let download_url = file_url(&client, file.id).unwrap();
+                if downloaded_files.iter().find(|&x| x == &file.name) == None {
+                    if config.max_display.is_none() || num_ouputted < config.max_display.unwrap() {
+                        num_ouputted += 1;
+                        writeln!(handle, "{}", download_url)?;
+                    }
+                } else {
+                    // Delete the file first
+                    debug!("Deleting file with ID: {} (file: {})", file.id, file.name);
+                    delete_file(&client, file.id).unwrap();
+                    // Check if the parent can now be deleted
+                    if file.parent_id != config.parent_id
+                        && parent_safe_to_delete(&client, &file, config.per_page)
+                    {
+                        debug!(
+                            "Deleting parent directory with ID: {} (file: {})",
+                            file.parent_id, file.name
+                        );
+                        delete_file(&client, file.parent_id).unwrap();
+                    }
+                    let completed_dir = Path::new("completed");
+                    if !completed_dir.is_dir() {
+                        fs::create_dir(completed_dir).unwrap();
+                    }
+                    let completed_path = completed_dir.join(String::from(format!("{}", file.name)));
+                    fs::rename(file.name, completed_path).unwrap();
                 }
-            } else {
-                // Delete the file first
+            } else if file.file_type == "ARCHIVE" || is_unwanted_file(&file.name) {
                 debug!("Deleting file with ID: {} (file: {})", file.id, file.name);
                 delete_file(&client, file.id).unwrap();
-                // Check if the parent can now be deleted
-                if file.parent_id != config.parent_id
-                    && parent_safe_to_delete(&client, &file, config.per_page)
-                {
-                    debug!(
-                        "Deleting parent directory with ID: {} (file: {})",
-                        file.parent_id, file.name
-                    );
-                    delete_file(&client, file.parent_id).unwrap();
-                }
-                let completed_dir = Path::new("completed");
-                if !completed_dir.is_dir() {
-                    fs::create_dir(completed_dir).unwrap();
-                }
-                let completed_path = completed_dir.join(String::from(format!("{}", file.name)));
-                fs::rename(file.name, completed_path).unwrap();
+                unwanted_deleted += 1;
+            } else {
+                debug!(
+                    "Found this other file {} of type {}",
+                    file.name, file.file_type
+                );
             }
-        } else if file.file_type == "ARCHIVE" {
-            // Not downloading any archive files
-            debug!("Deleting file with ID: {} (file: {})", file.id, file.name);
-            delete_file(&client, file.id).unwrap();
-        } else {
-            debug!(
-                "Found this other file {} of type {}",
-                file.name, file.file_type
-            );
         }
+
+        if num_ouputted > 0 || unwanted_deleted == 0 {
+            break;
+        }
+        debug!(
+            "Deleted {} unwanted files, retrying files_list",
+            unwanted_deleted
+        );
     }
 
     Ok(())
@@ -335,10 +371,7 @@ mod tests {
     #[test]
     fn config_with_env_token() -> Result<(), String> {
         std::env::set_var("PUTIO_TOKEN", "test_token_from_env");
-        let args: Vec<String> = vec![
-            String::from("putio"),
-            String::from("921234"),
-        ];
+        let args: Vec<String> = vec![String::from("putio"), String::from("921234")];
         let config = Config::new(&args);
         std::env::remove_var("PUTIO_TOKEN");
         match config {
