@@ -32,19 +32,28 @@ pub struct Config {
 
 impl Config {
     pub fn new(args: &[String]) -> Result<Config, &'static str> {
-        if args.len() < 3 {
-            return Err("Not enough arguments: oauth_token and parent_id folder are required.");
+        let (oauth_token, arg_offset) = match std::env::var("PUTIO_TOKEN") {
+            Ok(token) if !token.is_empty() => (token, 0),
+            _ => {
+                if args.len() < 3 {
+                    return Err("Not enough arguments: set PUTIO_TOKEN env var or pass oauth_token as first argument, followed by parent_id.");
+                }
+                (args[1].clone(), 1)
+            }
+        };
+
+        if args.len() < 2 + arg_offset {
+            return Err("Not enough arguments: parent_id is required.");
         }
 
-        let oauth_token = args[1].clone();
-        let parent_id: i64 = args[2].parse::<i64>().unwrap();
+        let parent_id: i64 = args[1 + arg_offset].parse::<i64>().unwrap();
         let mut max_display: Option<u32> = None;
         let mut per_page = 1;
-        if args.len() >= 4 {
-            max_display = Some(args[3].parse::<u32>().unwrap());
+        if args.len() >= 3 + arg_offset {
+            max_display = Some(args[2 + arg_offset].parse::<u32>().unwrap());
         }
-        if args.len() >= 5 {
-            per_page = args[4].parse::<i8>().unwrap();
+        if args.len() >= 4 + arg_offset {
+            per_page = args[3 + arg_offset].parse::<i8>().unwrap();
         }
 
         Ok(Config {
@@ -182,6 +191,8 @@ fn files_list(client: &Client, parent_id: i64, per_page: i8) -> Result<Vec<File>
                 files.push(file);
             }
         }
+    } else {
+        debug!("files_list failed for parent_id={}: HTTP {}", parent_id, response.status());
     }
 
     Ok(files)
@@ -196,6 +207,7 @@ fn file_url(client: &Client, file_id: i64) -> Result<String, Box<dyn Error>> {
         debug!("Got download URL for file_id={}", file_id);
         Ok(file_url.url)
     } else {
+        debug!("file_url failed for file_id={}: HTTP {}", file_id, response.status());
         return Err(Box::new(PutioError(
             "Error fetching file download url.".into(),
         )));
@@ -285,7 +297,8 @@ mod tests {
     use super::*;
 
     #[test]
-    fn config_not_enough_args() -> Result<(), String> {
+    fn config_not_enough_args_no_env() -> Result<(), String> {
+        std::env::remove_var("PUTIO_TOKEN");
         let args: Vec<String> = vec![String::from(""), String::from("")];
         let config = Config::new(&args);
         let result = match config {
@@ -303,7 +316,8 @@ mod tests {
     }
 
     #[test]
-    fn config_has_enough_args() -> Result<(), String> {
+    fn config_has_enough_args_no_env() -> Result<(), String> {
+        std::env::remove_var("PUTIO_TOKEN");
         let args: Vec<String> = vec![
             String::from("putio"),
             String::from("api_token"),
@@ -316,5 +330,24 @@ mod tests {
         };
 
         result
+    }
+
+    #[test]
+    fn config_with_env_token() -> Result<(), String> {
+        std::env::set_var("PUTIO_TOKEN", "test_token_from_env");
+        let args: Vec<String> = vec![
+            String::from("putio"),
+            String::from("921234"),
+        ];
+        let config = Config::new(&args);
+        std::env::remove_var("PUTIO_TOKEN");
+        match config {
+            Ok(config) => {
+                assert_eq!(config.oauth_token, "test_token_from_env");
+                assert_eq!(config.parent_id, 921234);
+                Ok(())
+            }
+            Err(err) => Err(String::from(format!("Unexpected error raised: {}", err))),
+        }
     }
 }
