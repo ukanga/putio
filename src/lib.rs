@@ -230,8 +230,9 @@ fn file_url(client: &Client, file_id: i64) -> Result<String, Box<dyn Error>> {
 }
 
 fn is_unwanted_file(name: &str) -> bool {
-    let name_lower = name.to_lowercase();
-    name_lower.ends_with(".exe") || name_lower.ends_with(".nfo") || name_lower.ends_with(".txt")
+    let ext = name.rsplit('.').next().unwrap_or("").trim().to_lowercase();
+    let unwanted = ["exe", "nfo", "txt", "png"];
+    unwanted.contains(&ext.as_str())
 }
 
 pub fn run(config: Config) -> Result<(), Box<dyn Error>> {
