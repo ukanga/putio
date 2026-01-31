@@ -285,6 +285,15 @@ pub fn run(config: Config) -> Result<(), Box<dyn Error>> {
                 debug!("Deleting file with ID: {} (file: {})", file.id, file.name);
                 delete_file(&client, file.id).unwrap();
                 unwanted_deleted += 1;
+                if file.parent_id != config.parent_id
+                    && parent_safe_to_delete(&client, &file, config.per_page)
+                {
+                    debug!(
+                        "Deleting empty parent directory with ID: {} (file: {})",
+                        file.parent_id, file.name
+                    );
+                    delete_file(&client, file.parent_id).unwrap();
+                }
             } else {
                 debug!(
                     "Found this other file {} of type {}",
