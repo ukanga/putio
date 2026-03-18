@@ -272,7 +272,7 @@ pub fn run(config: Config) -> Result<(), Box<dyn Error>> {
                     if !completed_dir.is_dir() {
                         fs::create_dir(completed_dir).unwrap();
                     }
-                    let completed_path = completed_dir.join(String::from(format!("{}", file.name)));
+                    let completed_path = completed_dir.join(&file.name);
                     fs::rename(file.name, completed_path).unwrap();
                 }
             } else if file.file_type == "ARCHIVE"
