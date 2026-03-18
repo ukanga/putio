@@ -140,10 +140,10 @@ fn list_dir(dir: &Path) -> io::Result<Vec<String>> {
         let aria2_extension = ".aria2";
         if !file.ends_with(&aria2_extension) {
             let aria2_file = format!("{}.aria2", file);
-            if file != &aria2_file {
-                if all_files.iter().find(|&x| x == &aria2_file) == None {
-                    files.push(String::from(file.clone()));
-                }
+            if file != &aria2_file
+                && all_files.iter().find(|&x| x == &aria2_file).is_none()
+            {
+                files.push(file.clone());
             }
         }
     }
