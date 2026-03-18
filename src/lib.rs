@@ -151,7 +151,7 @@ fn list_dir(dir: &Path) -> io::Result<Vec<String>> {
 }
 
 fn delete_file(client: &Client, file_id: i64) -> Result<(), Box<dyn Error>> {
-    let url = format!("https://api.put.io/v2/files/delete");
+    let url = "https://api.put.io/v2/files/delete".to_string();
     let body = json!({ "file_ids": file_id }).to_string();
     let _response = client
         .post(&url)
