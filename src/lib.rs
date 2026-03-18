@@ -293,7 +293,7 @@ pub fn run(config: Config) -> Result<(), Box<dyn Error>> {
             if file.file_type == "VIDEO" {
                 let download_url = file_url(&client, file.id)?;
                 if !downloaded_files.iter().any(|x| x == &file.name) {
-                    if config.max_display.is_none() || num_ouputted < config.max_display.unwrap() {
+                    if config.max_display.is_none_or(|max| num_ouputted < max) {
                         num_ouputted += 1;
                         writeln!(handle, "{}", download_url)?;
                     }
