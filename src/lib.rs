@@ -233,7 +233,7 @@ pub fn run(config: Config) -> Result<(), Box<dyn Error>> {
     let stdout = io::stdout();
     let mut handle = stdout.lock();
     let path = Path::new(".");
-    let downloaded_files = list_dir(&path).unwrap();
+    let downloaded_files = list_dir(path).unwrap();
     let client = Client::new(&config.oauth_token);
 
     loop {
@@ -249,7 +249,7 @@ pub fn run(config: Config) -> Result<(), Box<dyn Error>> {
             );
             if file.file_type == "VIDEO" {
                 let download_url = file_url(&client, file.id).unwrap();
-                if downloaded_files.iter().find(|&x| x == &file.name) == None {
+                if downloaded_files.iter().find(|&x| x == &file.name).is_none() {
                     if config.max_display.is_none() || num_ouputted < config.max_display.unwrap() {
                         num_ouputted += 1;
                         writeln!(handle, "{}", download_url)?;
