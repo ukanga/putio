@@ -217,9 +217,9 @@ fn file_url(client: &Client, file_id: i64) -> Result<String, Box<dyn Error>> {
             file_id,
             response.status()
         );
-        return Err(Box::new(PutioError(
+        Err(Box::new(PutioError(
             "Error fetching file download url.".into(),
-        )));
+        )))
     }
 }
 
