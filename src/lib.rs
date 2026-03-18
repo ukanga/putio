@@ -18,7 +18,7 @@ impl fmt::Display for PutioError {
 }
 impl Error for PutioError {}
 
-// #[derive(Debug)]
+#[derive(Debug)]
 pub struct Config {
     oauth_token: String,
     parent_id: i64,
@@ -42,14 +42,22 @@ impl Config {
             return Err("Not enough arguments: parent_id is required.");
         }
 
-        let parent_id: i64 = args[1 + arg_offset].parse::<i64>().unwrap();
+        let parent_id: i64 = args[1 + arg_offset]
+            .parse::<i64>()
+            .map_err(|_| "Invalid parent_id: expected an integer")?;
         let mut max_display: Option<u32> = None;
         let mut per_page = 1;
         if args.len() >= 3 + arg_offset {
-            max_display = Some(args[2 + arg_offset].parse::<u32>().unwrap());
+            max_display = Some(
+                args[2 + arg_offset]
+                    .parse::<u32>()
+                    .map_err(|_| "Invalid max_display: expected a positive integer")?,
+            );
         }
         if args.len() >= 4 + arg_offset {
-            per_page = args[3 + arg_offset].parse::<i8>().unwrap();
+            per_page = args[3 + arg_offset]
+                .parse::<i8>()
+                .map_err(|_| "Invalid per_page: expected a small integer")?;
         }
 
         Ok(Config {
@@ -453,5 +461,29 @@ mod tests {
         let json = r#"{"status":"OK","url":"https://example.com/download"}"#;
         let file_url: FileURL = serde_json::from_str(json).unwrap();
         assert_eq!(file_url.url, "https://example.com/download");
+    }
+
+    #[test]
+    fn config_invalid_parent_id() {
+        std::env::set_var("PUTIO_TOKEN", "test_token");
+        let args: Vec<String> = vec![String::from("putio"), String::from("not_a_number")];
+        let config = Config::new(&args);
+        std::env::remove_var("PUTIO_TOKEN");
+        assert!(config.is_err());
+        assert!(config.unwrap_err().contains("Invalid parent_id"));
+    }
+
+    #[test]
+    fn config_invalid_max_display() {
+        std::env::set_var("PUTIO_TOKEN", "test_token");
+        let args: Vec<String> = vec![
+            String::from("putio"),
+            String::from("123"),
+            String::from("not_a_number"),
+        ];
+        let config = Config::new(&args);
+        std::env::remove_var("PUTIO_TOKEN");
+        assert!(config.is_err());
+        assert!(config.unwrap_err().contains("Invalid max_display"));
     }
 }
