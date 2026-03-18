@@ -87,6 +87,19 @@ impl Client {
     }
 }
 
+/// Represents the Put.io API error response body.
+///
+/// Returned by the API when a request fails (e.g., file not found).
+/// Example: `{"error_id":null,"error_message":"File not found.","error_type":"FileNotFound",...}`
+// Fields are populated by serde deserialization and used in tests; not read in non-test code paths.
+#[allow(dead_code)]
+#[derive(Deserialize, Debug)]
+struct ApiError {
+    error_type: Option<String>,
+    error_message: Option<String>,
+    status_code: Option<i32>,
+}
+
 #[derive(Serialize, Deserialize)]
 struct FileURL {
     url: String,
@@ -193,11 +206,22 @@ fn files_list(client: &Client, parent_id: i64, per_page: i8) -> Result<Vec<File>
             }
         }
     } else {
+        let status = response.status();
         debug!(
             "files_list failed for parent_id={}: HTTP {}",
-            parent_id,
-            response.status()
+            parent_id, status
         );
+        let error_msg = response
+            .json::<ApiError>()
+            .map(|e| {
+                e.error_message
+                    .unwrap_or_else(|| format!("HTTP {}", status))
+            })
+            .unwrap_or_else(|_| format!("HTTP {}", status));
+        return Err(Box::new(PutioError(format!(
+            "Error listing files for parent_id={}: {}",
+            parent_id, error_msg
+        ))));
     }
 
     Ok(files)
@@ -212,14 +236,19 @@ fn file_url(client: &Client, file_id: i64) -> Result<String, Box<dyn Error>> {
         debug!("Got download URL for file_id={}", file_id);
         Ok(file_url.url)
     } else {
-        debug!(
-            "file_url failed for file_id={}: HTTP {}",
-            file_id,
-            response.status()
-        );
-        Err(Box::new(PutioError(
-            "Error fetching file download url.".into(),
-        )))
+        let status = response.status();
+        debug!("file_url failed for file_id={}: HTTP {}", file_id, status);
+        let error_msg = response
+            .json::<ApiError>()
+            .map(|e| {
+                e.error_message
+                    .unwrap_or_else(|| format!("HTTP {}", status))
+            })
+            .unwrap_or_else(|_| format!("HTTP {}", status));
+        Err(Box::new(PutioError(format!(
+            "Error fetching download url for file_id={}: {}",
+            file_id, error_msg
+        ))))
     }
 }
 
@@ -248,7 +277,7 @@ pub fn run(config: Config) -> Result<(), Box<dyn Error>> {
                 file.name, file.file_type, file.id
             );
             if file.file_type == "VIDEO" {
-                let download_url = file_url(&client, file.id).unwrap();
+                let download_url = file_url(&client, file.id)?;
                 if !downloaded_files.iter().any(|x| x == &file.name) {
                     if config.max_display.is_none() || num_ouputted < config.max_display.unwrap() {
                         num_ouputted += 1;
@@ -389,5 +418,30 @@ mod tests {
             }
             Err(err) => Err(format!("Unexpected error raised: {}", err)),
         }
+    }
+
+    #[test]
+    fn api_error_deserialize_file_not_found() {
+        let json = r#"{"error_id":null,"error_message":"File not found.","error_type":"FileNotFound","error_uri":"http://api.put.io/v2/docs","extra":{"file_id":789844},"status":"ERROR","status_code":404}"#;
+        let api_error: ApiError = serde_json::from_str(json).unwrap();
+        assert_eq!(api_error.error_type.as_deref(), Some("FileNotFound"));
+        assert_eq!(api_error.error_message.as_deref(), Some("File not found."));
+        assert_eq!(api_error.status_code, Some(404));
+    }
+
+    #[test]
+    fn api_error_deserialize_minimal() {
+        let json = r#"{"status":"ERROR"}"#;
+        let api_error: ApiError = serde_json::from_str(json).unwrap();
+        assert!(api_error.error_type.is_none());
+        assert!(api_error.error_message.is_none());
+        assert!(api_error.status_code.is_none());
+    }
+
+    #[test]
+    fn file_url_deserialize_valid() {
+        let json = r#"{"status":"OK","url":"https://example.com/download"}"#;
+        let file_url: FileURL = serde_json::from_str(json).unwrap();
+        assert_eq!(file_url.url, "https://example.com/download");
     }
 }
