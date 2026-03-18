@@ -186,10 +186,8 @@ fn files_list(client: &Client, parent_id: i64, per_page: i8) -> Result<Vec<File>
         );
         for file in response_files.files {
             if file.file_type == "FOLDER" {
-                let folder = files_list(&client, file.id, per_page).unwrap();
-                for f in folder {
-                    files.push(f);
-                }
+                let folder = files_list(client, file.id, per_page).unwrap();
+                files.extend(folder);
             } else {
                 files.push(file);
             }
@@ -318,7 +316,7 @@ fn parent_safe_to_delete(client: &Client, file: &File, per_page: i8) -> bool {
         "Checking if parent {} is safe to delete (file: {})",
         file.parent_id, file.name
     );
-    let files = files_list(&client, file.parent_id, per_page).unwrap();
+    let files = files_list(client, file.parent_id, per_page).unwrap();
     debug!("Found {} total files in parent directory", files.len());
     for file_in_dir in files {
         debug!(
