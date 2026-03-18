@@ -281,7 +281,10 @@ pub fn run(config: Config) -> Result<(), Box<dyn Error>> {
                     let completed_path = completed_dir.join(String::from(format!("{}", file.name)));
                     fs::rename(file.name, completed_path).unwrap();
                 }
-            } else if file.file_type == "ARCHIVE" || is_unwanted_file(&file.name) {
+            } else if file.file_type == "ARCHIVE"
+                || file.file_type == "IMAGE"
+                || is_unwanted_file(&file.name)
+            {
                 debug!("Deleting file with ID: {} (file: {})", file.id, file.name);
                 delete_file(&client, file.id).unwrap();
                 unwanted_deleted += 1;
