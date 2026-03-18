@@ -268,11 +268,11 @@ pub fn run(config: Config) -> Result<(), Box<dyn Error>> {
     let stdout = io::stdout();
     let mut handle = stdout.lock();
     let path = Path::new(".");
-    let downloaded_files = list_dir(path).unwrap();
+    let downloaded_files = list_dir(path)?;
     let client = Client::new(&config.oauth_token);
 
     loop {
-        let files = files_list(&client, config.parent_id, config.per_page).unwrap();
+        let files = files_list(&client, config.parent_id, config.per_page)?;
         debug!("Total files to process: {}", files.len());
         let mut num_ouputted: u32 = 0;
         let mut unwanted_deleted: u32 = 0;
@@ -292,39 +292,39 @@ pub fn run(config: Config) -> Result<(), Box<dyn Error>> {
                 } else {
                     // Delete the file first
                     debug!("Deleting file with ID: {} (file: {})", file.id, file.name);
-                    delete_file(&client, file.id).unwrap();
+                    delete_file(&client, file.id)?;
                     // Check if the parent can now be deleted
                     if file.parent_id != config.parent_id
-                        && parent_safe_to_delete(&client, &file, config.per_page)
+                        && parent_safe_to_delete(&client, &file, config.per_page)?
                     {
                         debug!(
                             "Deleting parent directory with ID: {} (file: {})",
                             file.parent_id, file.name
                         );
-                        delete_file(&client, file.parent_id).unwrap();
+                        delete_file(&client, file.parent_id)?;
                     }
                     let completed_dir = Path::new("completed");
                     if !completed_dir.is_dir() {
-                        fs::create_dir(completed_dir).unwrap();
+                        fs::create_dir(completed_dir)?;
                     }
                     let completed_path = completed_dir.join(&file.name);
-                    fs::rename(file.name, completed_path).unwrap();
+                    fs::rename(&file.name, completed_path)?;
                 }
             } else if file.file_type == "ARCHIVE"
                 || file.file_type == "IMAGE"
                 || is_unwanted_file(&file.name)
             {
                 debug!("Deleting file with ID: {} (file: {})", file.id, file.name);
-                delete_file(&client, file.id).unwrap();
+                delete_file(&client, file.id)?;
                 unwanted_deleted += 1;
                 if file.parent_id != config.parent_id
-                    && parent_safe_to_delete(&client, &file, config.per_page)
+                    && parent_safe_to_delete(&client, &file, config.per_page)?
                 {
                     debug!(
                         "Deleting empty parent directory with ID: {} (file: {})",
                         file.parent_id, file.name
                     );
-                    delete_file(&client, file.parent_id).unwrap();
+                    delete_file(&client, file.parent_id)?;
                 }
             } else {
                 debug!(
@@ -346,12 +346,16 @@ pub fn run(config: Config) -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
-fn parent_safe_to_delete(client: &Client, file: &File, per_page: i8) -> bool {
+fn parent_safe_to_delete(
+    client: &Client,
+    file: &File,
+    per_page: i8,
+) -> Result<bool, Box<dyn Error>> {
     debug!(
         "Checking if parent {} is safe to delete (file: {})",
         file.parent_id, file.name
     );
-    let files = files_list(client, file.parent_id, per_page).unwrap();
+    let files = files_list(client, file.parent_id, per_page)?;
     debug!("Found {} total files in parent directory", files.len());
     for file_in_dir in files {
         debug!(
@@ -363,11 +367,11 @@ fn parent_safe_to_delete(client: &Client, file: &File, per_page: i8) -> bool {
                 "Another VIDEO found ({}), parent NOT safe to delete",
                 file_in_dir.name
             );
-            return false;
+            return Ok(false);
         }
     }
     debug!("No other videos in parent, parent IS safe to delete");
-    true
+    Ok(true)
 }
 
 #[cfg(test)]
