@@ -1,7 +1,3 @@
-extern crate reqwest;
-extern crate serde;
-extern crate serde_json;
-
 use log::debug;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
