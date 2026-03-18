@@ -1,7 +1,3 @@
-extern crate reqwest;
-extern crate serde;
-extern crate serde_json;
-
 use log::debug;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -70,20 +66,20 @@ struct Client {
 }
 
 impl Client {
-    pub fn new(oauth_token: &String) -> Client {
-        let oauth_token = oauth_token.clone();
+    pub fn new(oauth_token: &str) -> Client {
+        let oauth_token = oauth_token.to_owned();
 
         Client { oauth_token }
     }
 
-    pub fn get(&self, url: &String) -> Result<reqwest::blocking::RequestBuilder, Box<dyn Error>> {
+    pub fn get(&self, url: &str) -> Result<reqwest::blocking::RequestBuilder, Box<dyn Error>> {
         let client = reqwest::blocking::Client::new();
         let headers = get_authorization_header(&self.oauth_token);
 
         Ok(client.get(url).headers(headers))
     }
 
-    pub fn post(&self, url: &String) -> Result<reqwest::blocking::RequestBuilder, Box<dyn Error>> {
+    pub fn post(&self, url: &str) -> Result<reqwest::blocking::RequestBuilder, Box<dyn Error>> {
         let client = reqwest::blocking::Client::new();
         let headers = get_authorization_header(&self.oauth_token);
 
@@ -114,11 +110,11 @@ struct Files {
     total: i32,
 }
 
-fn get_access_token_header(access_token: &String) -> String {
+fn get_access_token_header(access_token: &str) -> String {
     format!("Token {}", access_token)
 }
 
-fn get_authorization_header(oauth_token: &String) -> reqwest::header::HeaderMap {
+fn get_authorization_header(oauth_token: &str) -> reqwest::header::HeaderMap {
     let token = get_access_token_header(oauth_token);
     let mut headers = reqwest::header::HeaderMap::with_capacity(1);
     headers.insert(
@@ -144,10 +140,10 @@ fn list_dir(dir: &Path) -> io::Result<Vec<String>> {
         let aria2_extension = ".aria2";
         if !file.ends_with(&aria2_extension) {
             let aria2_file = format!("{}.aria2", file);
-            if file != &aria2_file {
-                if all_files.iter().find(|&x| x == &aria2_file) == None {
-                    files.push(String::from(file.clone()));
-                }
+            if file != &aria2_file
+                && !all_files.iter().any(|x| x == &aria2_file)
+            {
+                files.push(file.clone());
             }
         }
     }
@@ -155,7 +151,7 @@ fn list_dir(dir: &Path) -> io::Result<Vec<String>> {
 }
 
 fn delete_file(client: &Client, file_id: i64) -> Result<(), Box<dyn Error>> {
-    let url = format!("https://api.put.io/v2/files/delete");
+    let url = "https://api.put.io/v2/files/delete".to_string();
     let body = json!({ "file_ids": file_id }).to_string();
     let _response = client
         .post(&url)
@@ -190,10 +186,8 @@ fn files_list(client: &Client, parent_id: i64, per_page: i8) -> Result<Vec<File>
         );
         for file in response_files.files {
             if file.file_type == "FOLDER" {
-                let folder = files_list(&client, file.id, per_page).unwrap();
-                for f in folder {
-                    files.push(f);
-                }
+                let folder = files_list(client, file.id, per_page).unwrap();
+                files.extend(folder);
             } else {
                 files.push(file);
             }
@@ -223,9 +217,9 @@ fn file_url(client: &Client, file_id: i64) -> Result<String, Box<dyn Error>> {
             file_id,
             response.status()
         );
-        return Err(Box::new(PutioError(
+        Err(Box::new(PutioError(
             "Error fetching file download url.".into(),
-        )));
+        )))
     }
 }
 
@@ -239,7 +233,7 @@ pub fn run(config: Config) -> Result<(), Box<dyn Error>> {
     let stdout = io::stdout();
     let mut handle = stdout.lock();
     let path = Path::new(".");
-    let downloaded_files = list_dir(&path).unwrap();
+    let downloaded_files = list_dir(path).unwrap();
     let client = Client::new(&config.oauth_token);
 
     loop {
@@ -255,7 +249,7 @@ pub fn run(config: Config) -> Result<(), Box<dyn Error>> {
             );
             if file.file_type == "VIDEO" {
                 let download_url = file_url(&client, file.id).unwrap();
-                if downloaded_files.iter().find(|&x| x == &file.name) == None {
+                if !downloaded_files.iter().any(|x| x == &file.name) {
                     if config.max_display.is_none() || num_ouputted < config.max_display.unwrap() {
                         num_ouputted += 1;
                         writeln!(handle, "{}", download_url)?;
@@ -278,7 +272,7 @@ pub fn run(config: Config) -> Result<(), Box<dyn Error>> {
                     if !completed_dir.is_dir() {
                         fs::create_dir(completed_dir).unwrap();
                     }
-                    let completed_path = completed_dir.join(String::from(format!("{}", file.name)));
+                    let completed_path = completed_dir.join(&file.name);
                     fs::rename(file.name, completed_path).unwrap();
                 }
             } else if file.file_type == "ARCHIVE"
@@ -322,7 +316,7 @@ fn parent_safe_to_delete(client: &Client, file: &File, per_page: i8) -> bool {
         "Checking if parent {} is safe to delete (file: {})",
         file.parent_id, file.name
     );
-    let files = files_list(&client, file.parent_id, per_page).unwrap();
+    let files = files_list(client, file.parent_id, per_page).unwrap();
     debug!("Found {} total files in parent directory", files.len());
     for file_in_dir in files {
         debug!(
@@ -375,7 +369,7 @@ mod tests {
         let config = Config::new(&args);
         let result = match config {
             Ok(_config) => Ok(()),
-            Err(err) => Err(String::from(format!("Unexpected error raised: {}", err))),
+            Err(err) => Err(format!("Unexpected error raised: {}", err)),
         };
 
         result
@@ -393,7 +387,7 @@ mod tests {
                 assert_eq!(config.parent_id, 921234);
                 Ok(())
             }
-            Err(err) => Err(String::from(format!("Unexpected error raised: {}", err))),
+            Err(err) => Err(format!("Unexpected error raised: {}", err)),
         }
     }
 }
