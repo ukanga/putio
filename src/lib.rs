@@ -141,7 +141,7 @@ fn list_dir(dir: &Path) -> io::Result<Vec<String>> {
         if !file.ends_with(&aria2_extension) {
             let aria2_file = format!("{}.aria2", file);
             if file != &aria2_file
-                && all_files.iter().find(|&x| x == &aria2_file).is_none()
+                && !all_files.iter().any(|x| x == &aria2_file)
             {
                 files.push(file.clone());
             }
@@ -249,7 +249,7 @@ pub fn run(config: Config) -> Result<(), Box<dyn Error>> {
             );
             if file.file_type == "VIDEO" {
                 let download_url = file_url(&client, file.id).unwrap();
-                if downloaded_files.iter().find(|&x| x == &file.name).is_none() {
+                if !downloaded_files.iter().any(|x| x == &file.name) {
                     if config.max_display.is_none() || num_ouputted < config.max_display.unwrap() {
                         num_ouputted += 1;
                         writeln!(handle, "{}", download_url)?;
