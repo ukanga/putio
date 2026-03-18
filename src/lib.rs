@@ -369,7 +369,7 @@ mod tests {
         let config = Config::new(&args);
         let result = match config {
             Ok(_config) => Ok(()),
-            Err(err) => Err(String::from(format!("Unexpected error raised: {}", err))),
+            Err(err) => Err(format!("Unexpected error raised: {}", err)),
         };
 
         result
@@ -387,7 +387,7 @@ mod tests {
                 assert_eq!(config.parent_id, 921234);
                 Ok(())
             }
-            Err(err) => Err(String::from(format!("Unexpected error raised: {}", err))),
+            Err(err) => Err(format!("Unexpected error raised: {}", err)),
         }
     }
 }
