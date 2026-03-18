@@ -74,14 +74,14 @@ impl Client {
 
     pub fn get(&self, url: &str) -> Result<reqwest::blocking::RequestBuilder, Box<dyn Error>> {
         let client = reqwest::blocking::Client::new();
-        let headers = get_authorization_header(&self.oauth_token);
+        let headers = get_authorization_header(&self.oauth_token)?;
 
         Ok(client.get(url).headers(headers))
     }
 
     pub fn post(&self, url: &str) -> Result<reqwest::blocking::RequestBuilder, Box<dyn Error>> {
         let client = reqwest::blocking::Client::new();
-        let headers = get_authorization_header(&self.oauth_token);
+        let headers = get_authorization_header(&self.oauth_token)?;
 
         Ok(client.post(url).headers(headers))
     }
@@ -127,15 +127,17 @@ fn get_access_token_header(access_token: &str) -> String {
     format!("Token {}", access_token)
 }
 
-fn get_authorization_header(oauth_token: &str) -> reqwest::header::HeaderMap {
+fn get_authorization_header(
+    oauth_token: &str,
+) -> Result<reqwest::header::HeaderMap, Box<dyn Error>> {
     let token = get_access_token_header(oauth_token);
     let mut headers = reqwest::header::HeaderMap::with_capacity(1);
     headers.insert(
         reqwest::header::AUTHORIZATION,
-        reqwest::header::HeaderValue::from_str(&token).unwrap(),
+        reqwest::header::HeaderValue::from_str(&token)?,
     );
 
-    headers
+    Ok(headers)
 }
 
 fn list_dir(dir: &Path) -> io::Result<Vec<String>> {
@@ -145,7 +147,12 @@ fn list_dir(dir: &Path) -> io::Result<Vec<String>> {
         for entry in fs::read_dir(dir)? {
             let entry = entry?;
             let path = entry.path();
-            let path = path.file_name().unwrap().to_str().unwrap();
+            let path = path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .ok_or_else(|| {
+                    io::Error::new(io::ErrorKind::InvalidData, "invalid filename encoding")
+                })?;
             all_files.push(String::from(path));
         }
     }
@@ -167,8 +174,7 @@ fn delete_file(client: &Client, file_id: i64) -> Result<(), Box<dyn Error>> {
     let url = "https://api.put.io/v2/files/delete".to_string();
     let body = json!({ "file_ids": file_id }).to_string();
     let _response = client
-        .post(&url)
-        .unwrap()
+        .post(&url)?
         .header(
             reqwest::header::CONTENT_TYPE,
             reqwest::header::HeaderValue::from_static("application/json"),
@@ -188,7 +194,7 @@ fn files_list(client: &Client, parent_id: i64, per_page: i8) -> Result<Vec<File>
         "Listing files for parent_id={} per_page={}",
         parent_id, per_page
     );
-    let response = client.get(&url).unwrap().send()?;
+    let response = client.get(&url)?.send()?;
     let mut files: Vec<File> = Vec::new();
     if response.status().is_success() {
         let response_files: Files = response.json()?;
@@ -199,7 +205,7 @@ fn files_list(client: &Client, parent_id: i64, per_page: i8) -> Result<Vec<File>
         );
         for file in response_files.files {
             if file.file_type == "FOLDER" {
-                let folder = files_list(client, file.id, per_page).unwrap();
+                let folder = files_list(client, file.id, per_page)?;
                 files.extend(folder);
             } else {
                 files.push(file);
@@ -230,7 +236,7 @@ fn files_list(client: &Client, parent_id: i64, per_page: i8) -> Result<Vec<File>
 fn file_url(client: &Client, file_id: i64) -> Result<String, Box<dyn Error>> {
     let url = format!("https://api.put.io/v2/files/{}/url", file_id);
     debug!("Fetching download URL for file_id={}", file_id);
-    let response = client.get(&url).unwrap().send()?;
+    let response = client.get(&url)?.send()?;
     if response.status().is_success() {
         let file_url: FileURL = response.json()?;
         debug!("Got download URL for file_id={}", file_id);
