@@ -66,20 +66,20 @@ struct Client {
 }
 
 impl Client {
-    pub fn new(oauth_token: &String) -> Client {
-        let oauth_token = oauth_token.clone();
+    pub fn new(oauth_token: &str) -> Client {
+        let oauth_token = oauth_token.to_owned();
 
         Client { oauth_token }
     }
 
-    pub fn get(&self, url: &String) -> Result<reqwest::blocking::RequestBuilder, Box<dyn Error>> {
+    pub fn get(&self, url: &str) -> Result<reqwest::blocking::RequestBuilder, Box<dyn Error>> {
         let client = reqwest::blocking::Client::new();
         let headers = get_authorization_header(&self.oauth_token);
 
         Ok(client.get(url).headers(headers))
     }
 
-    pub fn post(&self, url: &String) -> Result<reqwest::blocking::RequestBuilder, Box<dyn Error>> {
+    pub fn post(&self, url: &str) -> Result<reqwest::blocking::RequestBuilder, Box<dyn Error>> {
         let client = reqwest::blocking::Client::new();
         let headers = get_authorization_header(&self.oauth_token);
 
@@ -110,11 +110,11 @@ struct Files {
     total: i32,
 }
 
-fn get_access_token_header(access_token: &String) -> String {
+fn get_access_token_header(access_token: &str) -> String {
     format!("Token {}", access_token)
 }
 
-fn get_authorization_header(oauth_token: &String) -> reqwest::header::HeaderMap {
+fn get_authorization_header(oauth_token: &str) -> reqwest::header::HeaderMap {
     let token = get_access_token_header(oauth_token);
     let mut headers = reqwest::header::HeaderMap::with_capacity(1);
     headers.insert(
