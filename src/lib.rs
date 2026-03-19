@@ -18,7 +18,7 @@ impl fmt::Display for PutioError {
 }
 impl Error for PutioError {}
 
-// #[derive(Debug)]
+#[derive(Debug)]
 pub struct Config {
     oauth_token: String,
     parent_id: i64,
@@ -42,14 +42,22 @@ impl Config {
             return Err("Not enough arguments: parent_id is required.");
         }
 
-        let parent_id: i64 = args[1 + arg_offset].parse::<i64>().unwrap();
+        let parent_id: i64 = args[1 + arg_offset]
+            .parse::<i64>()
+            .map_err(|_| "Invalid parent_id: expected an integer")?;
         let mut max_display: Option<u32> = None;
         let mut per_page = 1;
         if args.len() >= 3 + arg_offset {
-            max_display = Some(args[2 + arg_offset].parse::<u32>().unwrap());
+            max_display = Some(
+                args[2 + arg_offset]
+                    .parse::<u32>()
+                    .map_err(|_| "Invalid max_display: expected a positive integer")?,
+            );
         }
         if args.len() >= 4 + arg_offset {
-            per_page = args[3 + arg_offset].parse::<i8>().unwrap();
+            per_page = args[3 + arg_offset]
+                .parse::<i8>()
+                .map_err(|_| "Invalid per_page: expected a small integer")?;
         }
 
         Ok(Config {
@@ -74,17 +82,30 @@ impl Client {
 
     pub fn get(&self, url: &str) -> Result<reqwest::blocking::RequestBuilder, Box<dyn Error>> {
         let client = reqwest::blocking::Client::new();
-        let headers = get_authorization_header(&self.oauth_token);
+        let headers = get_authorization_header(&self.oauth_token)?;
 
         Ok(client.get(url).headers(headers))
     }
 
     pub fn post(&self, url: &str) -> Result<reqwest::blocking::RequestBuilder, Box<dyn Error>> {
         let client = reqwest::blocking::Client::new();
-        let headers = get_authorization_header(&self.oauth_token);
+        let headers = get_authorization_header(&self.oauth_token)?;
 
         Ok(client.post(url).headers(headers))
     }
+}
+
+/// Represents the Put.io API error response body.
+///
+/// Returned by the API when a request fails (e.g., file not found).
+/// Example: `{"error_id":null,"error_message":"File not found.","error_type":"FileNotFound",...}`
+// Fields are populated by serde deserialization and used in tests; not read in non-test code paths.
+#[allow(dead_code)]
+#[derive(Deserialize, Debug)]
+struct ApiError {
+    error_type: Option<String>,
+    error_message: Option<String>,
+    status_code: Option<i32>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -114,15 +135,17 @@ fn get_access_token_header(access_token: &str) -> String {
     format!("Token {}", access_token)
 }
 
-fn get_authorization_header(oauth_token: &str) -> reqwest::header::HeaderMap {
+fn get_authorization_header(
+    oauth_token: &str,
+) -> Result<reqwest::header::HeaderMap, Box<dyn Error>> {
     let token = get_access_token_header(oauth_token);
     let mut headers = reqwest::header::HeaderMap::with_capacity(1);
     headers.insert(
         reqwest::header::AUTHORIZATION,
-        reqwest::header::HeaderValue::from_str(&token).unwrap(),
+        reqwest::header::HeaderValue::from_str(&token)?,
     );
 
-    headers
+    Ok(headers)
 }
 
 fn list_dir(dir: &Path) -> io::Result<Vec<String>> {
@@ -132,7 +155,12 @@ fn list_dir(dir: &Path) -> io::Result<Vec<String>> {
         for entry in fs::read_dir(dir)? {
             let entry = entry?;
             let path = entry.path();
-            let path = path.file_name().unwrap().to_str().unwrap();
+            let path = path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .ok_or_else(|| {
+                    io::Error::new(io::ErrorKind::InvalidData, "invalid filename encoding")
+                })?;
             all_files.push(String::from(path));
         }
     }
@@ -154,8 +182,7 @@ fn delete_file(client: &Client, file_id: i64) -> Result<(), Box<dyn Error>> {
     let url = "https://api.put.io/v2/files/delete".to_string();
     let body = json!({ "file_ids": file_id }).to_string();
     let _response = client
-        .post(&url)
-        .unwrap()
+        .post(&url)?
         .header(
             reqwest::header::CONTENT_TYPE,
             reqwest::header::HeaderValue::from_static("application/json"),
@@ -175,7 +202,7 @@ fn files_list(client: &Client, parent_id: i64, per_page: i8) -> Result<Vec<File>
         "Listing files for parent_id={} per_page={}",
         parent_id, per_page
     );
-    let response = client.get(&url).unwrap().send()?;
+    let response = client.get(&url)?.send()?;
     let mut files: Vec<File> = Vec::new();
     if response.status().is_success() {
         let response_files: Files = response.json()?;
@@ -186,18 +213,29 @@ fn files_list(client: &Client, parent_id: i64, per_page: i8) -> Result<Vec<File>
         );
         for file in response_files.files {
             if file.file_type == "FOLDER" {
-                let folder = files_list(client, file.id, per_page).unwrap();
+                let folder = files_list(client, file.id, per_page)?;
                 files.extend(folder);
             } else {
                 files.push(file);
             }
         }
     } else {
+        let status = response.status();
         debug!(
             "files_list failed for parent_id={}: HTTP {}",
-            parent_id,
-            response.status()
+            parent_id, status
         );
+        let error_msg = response
+            .json::<ApiError>()
+            .map(|e| {
+                e.error_message
+                    .unwrap_or_else(|| format!("HTTP {}", status))
+            })
+            .unwrap_or_else(|_| format!("HTTP {}", status));
+        return Err(Box::new(PutioError(format!(
+            "Error listing files for parent_id={}: {}",
+            parent_id, error_msg
+        ))));
     }
 
     Ok(files)
@@ -206,20 +244,25 @@ fn files_list(client: &Client, parent_id: i64, per_page: i8) -> Result<Vec<File>
 fn file_url(client: &Client, file_id: i64) -> Result<String, Box<dyn Error>> {
     let url = format!("https://api.put.io/v2/files/{}/url", file_id);
     debug!("Fetching download URL for file_id={}", file_id);
-    let response = client.get(&url).unwrap().send()?;
+    let response = client.get(&url)?.send()?;
     if response.status().is_success() {
         let file_url: FileURL = response.json()?;
         debug!("Got download URL for file_id={}", file_id);
         Ok(file_url.url)
     } else {
-        debug!(
-            "file_url failed for file_id={}: HTTP {}",
-            file_id,
-            response.status()
-        );
-        Err(Box::new(PutioError(
-            "Error fetching file download url.".into(),
-        )))
+        let status = response.status();
+        debug!("file_url failed for file_id={}: HTTP {}", file_id, status);
+        let error_msg = response
+            .json::<ApiError>()
+            .map(|e| {
+                e.error_message
+                    .unwrap_or_else(|| format!("HTTP {}", status))
+            })
+            .unwrap_or_else(|_| format!("HTTP {}", status));
+        Err(Box::new(PutioError(format!(
+            "Error fetching download url for file_id={}: {}",
+            file_id, error_msg
+        ))))
     }
 }
 
@@ -233,11 +276,11 @@ pub fn run(config: Config) -> Result<(), Box<dyn Error>> {
     let stdout = io::stdout();
     let mut handle = stdout.lock();
     let path = Path::new(".");
-    let downloaded_files = list_dir(path).unwrap();
+    let downloaded_files = list_dir(path)?;
     let client = Client::new(&config.oauth_token);
 
     loop {
-        let files = files_list(&client, config.parent_id, config.per_page).unwrap();
+        let files = files_list(&client, config.parent_id, config.per_page)?;
         debug!("Total files to process: {}", files.len());
         let mut num_ouputted: u32 = 0;
         let mut unwanted_deleted: u32 = 0;
@@ -248,48 +291,48 @@ pub fn run(config: Config) -> Result<(), Box<dyn Error>> {
                 file.name, file.file_type, file.id
             );
             if file.file_type == "VIDEO" {
-                let download_url = file_url(&client, file.id).unwrap();
+                let download_url = file_url(&client, file.id)?;
                 if !downloaded_files.iter().any(|x| x == &file.name) {
-                    if config.max_display.is_none() || num_ouputted < config.max_display.unwrap() {
+                    if config.max_display.is_none_or(|max| num_ouputted < max) {
                         num_ouputted += 1;
                         writeln!(handle, "{}", download_url)?;
                     }
                 } else {
                     // Delete the file first
                     debug!("Deleting file with ID: {} (file: {})", file.id, file.name);
-                    delete_file(&client, file.id).unwrap();
+                    delete_file(&client, file.id)?;
                     // Check if the parent can now be deleted
                     if file.parent_id != config.parent_id
-                        && parent_safe_to_delete(&client, &file, config.per_page)
+                        && parent_safe_to_delete(&client, &file, config.per_page)?
                     {
                         debug!(
                             "Deleting parent directory with ID: {} (file: {})",
                             file.parent_id, file.name
                         );
-                        delete_file(&client, file.parent_id).unwrap();
+                        delete_file(&client, file.parent_id)?;
                     }
                     let completed_dir = Path::new("completed");
                     if !completed_dir.is_dir() {
-                        fs::create_dir(completed_dir).unwrap();
+                        fs::create_dir(completed_dir)?;
                     }
                     let completed_path = completed_dir.join(&file.name);
-                    fs::rename(file.name, completed_path).unwrap();
+                    fs::rename(&file.name, completed_path)?;
                 }
             } else if file.file_type == "ARCHIVE"
                 || file.file_type == "IMAGE"
                 || is_unwanted_file(&file.name)
             {
                 debug!("Deleting file with ID: {} (file: {})", file.id, file.name);
-                delete_file(&client, file.id).unwrap();
+                delete_file(&client, file.id)?;
                 unwanted_deleted += 1;
                 if file.parent_id != config.parent_id
-                    && parent_safe_to_delete(&client, &file, config.per_page)
+                    && parent_safe_to_delete(&client, &file, config.per_page)?
                 {
                     debug!(
                         "Deleting empty parent directory with ID: {} (file: {})",
                         file.parent_id, file.name
                     );
-                    delete_file(&client, file.parent_id).unwrap();
+                    delete_file(&client, file.parent_id)?;
                 }
             } else {
                 debug!(
@@ -311,12 +354,16 @@ pub fn run(config: Config) -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
-fn parent_safe_to_delete(client: &Client, file: &File, per_page: i8) -> bool {
+fn parent_safe_to_delete(
+    client: &Client,
+    file: &File,
+    per_page: i8,
+) -> Result<bool, Box<dyn Error>> {
     debug!(
         "Checking if parent {} is safe to delete (file: {})",
         file.parent_id, file.name
     );
-    let files = files_list(client, file.parent_id, per_page).unwrap();
+    let files = files_list(client, file.parent_id, per_page)?;
     debug!("Found {} total files in parent directory", files.len());
     for file_in_dir in files {
         debug!(
@@ -328,11 +375,11 @@ fn parent_safe_to_delete(client: &Client, file: &File, per_page: i8) -> bool {
                 "Another VIDEO found ({}), parent NOT safe to delete",
                 file_in_dir.name
             );
-            return false;
+            return Ok(false);
         }
     }
     debug!("No other videos in parent, parent IS safe to delete");
-    true
+    Ok(true)
 }
 
 #[cfg(test)]
@@ -389,5 +436,54 @@ mod tests {
             }
             Err(err) => Err(format!("Unexpected error raised: {}", err)),
         }
+    }
+
+    #[test]
+    fn api_error_deserialize_file_not_found() {
+        let json = r#"{"error_id":null,"error_message":"File not found.","error_type":"FileNotFound","error_uri":"http://api.put.io/v2/docs","extra":{"file_id":789844},"status":"ERROR","status_code":404}"#;
+        let api_error: ApiError = serde_json::from_str(json).unwrap();
+        assert_eq!(api_error.error_type.as_deref(), Some("FileNotFound"));
+        assert_eq!(api_error.error_message.as_deref(), Some("File not found."));
+        assert_eq!(api_error.status_code, Some(404));
+    }
+
+    #[test]
+    fn api_error_deserialize_minimal() {
+        let json = r#"{"status":"ERROR"}"#;
+        let api_error: ApiError = serde_json::from_str(json).unwrap();
+        assert!(api_error.error_type.is_none());
+        assert!(api_error.error_message.is_none());
+        assert!(api_error.status_code.is_none());
+    }
+
+    #[test]
+    fn file_url_deserialize_valid() {
+        let json = r#"{"status":"OK","url":"https://example.com/download"}"#;
+        let file_url: FileURL = serde_json::from_str(json).unwrap();
+        assert_eq!(file_url.url, "https://example.com/download");
+    }
+
+    #[test]
+    fn config_invalid_parent_id() {
+        std::env::set_var("PUTIO_TOKEN", "test_token");
+        let args: Vec<String> = vec![String::from("putio"), String::from("not_a_number")];
+        let config = Config::new(&args);
+        std::env::remove_var("PUTIO_TOKEN");
+        assert!(config.is_err());
+        assert!(config.unwrap_err().contains("Invalid parent_id"));
+    }
+
+    #[test]
+    fn config_invalid_max_display() {
+        std::env::set_var("PUTIO_TOKEN", "test_token");
+        let args: Vec<String> = vec![
+            String::from("putio"),
+            String::from("123"),
+            String::from("not_a_number"),
+        ];
+        let config = Config::new(&args);
+        std::env::remove_var("PUTIO_TOKEN");
+        assert!(config.is_err());
+        assert!(config.unwrap_err().contains("Invalid max_display"));
     }
 }
