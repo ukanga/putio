@@ -1,3 +1,4 @@
+use clap::Parser;
 use log::debug;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -18,54 +19,43 @@ impl fmt::Display for PutioError {
 }
 impl Error for PutioError {}
 
-#[derive(Debug)]
+/// Command-line configuration for the put.io tool.
+///
+/// `parent_id` is required and positional. The OAuth token is read from the
+/// `PUTIO_TOKEN` environment variable in [`Config::resolve_token`].
+#[derive(Parser, Debug)]
+#[command(about = "List, download, and clean up files on put.io")]
 pub struct Config {
-    oauth_token: String,
-    parent_id: i64,
-    max_display: Option<u32>,
-    per_page: i8,
+    /// Parent folder ID on put.io
+    pub parent_id: i64,
+
+    /// Maximum number of download URLs to output
+    #[arg(long)]
+    pub max_display: Option<u32>,
+
+    /// Results per API page
+    #[arg(long, default_value_t = 1)]
+    pub per_page: i8,
+
+    /// OAuth token, populated from the `PUTIO_TOKEN` environment variable.
+    #[arg(skip)]
+    pub oauth_token: String,
 }
 
 impl Config {
-    pub fn new(args: &[String]) -> Result<Config, &'static str> {
-        let (oauth_token, arg_offset) = match std::env::var("PUTIO_TOKEN") {
-            Ok(token) if !token.is_empty() => (token, 0),
-            _ => {
-                if args.len() < 3 {
-                    return Err("Not enough arguments: set PUTIO_TOKEN env var or pass oauth_token as first argument, followed by parent_id.");
-                }
-                (args[1].clone(), 1)
+    /// Resolve the OAuth token from the `PUTIO_TOKEN` environment variable.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if `PUTIO_TOKEN` is unset or empty.
+    pub fn resolve_token(&mut self) -> Result<(), &'static str> {
+        match std::env::var("PUTIO_TOKEN") {
+            Ok(token) if !token.is_empty() => {
+                self.oauth_token = token;
+                Ok(())
             }
-        };
-
-        if args.len() < 2 + arg_offset {
-            return Err("Not enough arguments: parent_id is required.");
+            _ => Err("PUTIO_TOKEN environment variable is required"),
         }
-
-        let parent_id: i64 = args[1 + arg_offset]
-            .parse::<i64>()
-            .map_err(|_| "Invalid parent_id: expected an integer")?;
-        let mut max_display: Option<u32> = None;
-        let mut per_page = 1;
-        if args.len() >= 3 + arg_offset {
-            max_display = Some(
-                args[2 + arg_offset]
-                    .parse::<u32>()
-                    .map_err(|_| "Invalid max_display: expected a positive integer")?,
-            );
-        }
-        if args.len() >= 4 + arg_offset {
-            per_page = args[3 + arg_offset]
-                .parse::<i8>()
-                .map_err(|_| "Invalid per_page: expected a small integer")?;
-        }
-
-        Ok(Config {
-            oauth_token,
-            parent_id,
-            max_display,
-            per_page,
-        })
     }
 }
 
@@ -155,12 +145,9 @@ fn list_dir(dir: &Path) -> io::Result<Vec<String>> {
         for entry in fs::read_dir(dir)? {
             let entry = entry?;
             let path = entry.path();
-            let path = path
-                .file_name()
-                .and_then(|n| n.to_str())
-                .ok_or_else(|| {
-                    io::Error::new(io::ErrorKind::InvalidData, "invalid filename encoding")
-                })?;
+            let path = path.file_name().and_then(|n| n.to_str()).ok_or_else(|| {
+                io::Error::new(io::ErrorKind::InvalidData, "invalid filename encoding")
+            })?;
             all_files.push(String::from(path));
         }
     }
@@ -168,9 +155,7 @@ fn list_dir(dir: &Path) -> io::Result<Vec<String>> {
         let aria2_extension = ".aria2";
         if !file.ends_with(&aria2_extension) {
             let aria2_file = format!("{}.aria2", file);
-            if file != &aria2_file
-                && !all_files.iter().any(|x| x == &aria2_file)
-            {
+            if file != &aria2_file && !all_files.iter().any(|x| x == &aria2_file) {
                 files.push(file.clone());
             }
         }
@@ -393,57 +378,38 @@ fn parent_safe_to_delete(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Mutex;
+
+    // Serialize tests that mutate the PUTIO_TOKEN env var so cargo's parallel
+    // test runner can't race set/remove against another test's read.
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
 
     #[test]
-    fn config_not_enough_args_no_env() -> Result<(), String> {
-        std::env::remove_var("PUTIO_TOKEN");
-        let args: Vec<String> = vec![String::from(""), String::from("")];
-        let config = Config::new(&args);
-        let result = match config {
-            Ok(_config) => Err(String::from("Should fail with missing args")),
-            Err(err) => {
-                assert!(
-                    err.contains("Not enough arguments"),
-                    "Not enough arguments error message not present in error."
-                );
-                Ok(())
-            }
-        };
-
-        result
+    fn config_missing_parent_id() {
+        let result = Config::try_parse_from(["putio"]);
+        assert!(result.is_err(), "Should fail when parent_id is missing");
     }
 
     #[test]
-    fn config_has_enough_args_no_env() -> Result<(), String> {
+    fn config_resolve_token_missing_env() {
+        let _guard = ENV_LOCK.lock().unwrap();
         std::env::remove_var("PUTIO_TOKEN");
-        let args: Vec<String> = vec![
-            String::from("putio"),
-            String::from("api_token"),
-            String::from("921234"),
-        ];
-        let config = Config::new(&args);
-        let result = match config {
-            Ok(_config) => Ok(()),
-            Err(err) => Err(format!("Unexpected error raised: {}", err)),
-        };
-
-        result
+        let mut config = Config::try_parse_from(["putio", "921234"]).expect("parse");
+        let result = config.resolve_token();
+        assert!(result.is_err());
     }
 
     #[test]
-    fn config_with_env_token() -> Result<(), String> {
+    fn config_resolve_token_from_env() -> Result<(), String> {
+        let _guard = ENV_LOCK.lock().unwrap();
         std::env::set_var("PUTIO_TOKEN", "test_token_from_env");
-        let args: Vec<String> = vec![String::from("putio"), String::from("921234")];
-        let config = Config::new(&args);
+        let mut config = Config::try_parse_from(["putio", "921234"]).map_err(|e| e.to_string())?;
+        let resolved = config.resolve_token();
         std::env::remove_var("PUTIO_TOKEN");
-        match config {
-            Ok(config) => {
-                assert_eq!(config.oauth_token, "test_token_from_env");
-                assert_eq!(config.parent_id, 921234);
-                Ok(())
-            }
-            Err(err) => Err(format!("Unexpected error raised: {}", err)),
-        }
+        resolved.map_err(|e| e.to_string())?;
+        assert_eq!(config.oauth_token, "test_token_from_env");
+        assert_eq!(config.parent_id, 921234);
+        Ok(())
     }
 
     #[test]
@@ -473,25 +439,13 @@ mod tests {
 
     #[test]
     fn config_invalid_parent_id() {
-        std::env::set_var("PUTIO_TOKEN", "test_token");
-        let args: Vec<String> = vec![String::from("putio"), String::from("not_a_number")];
-        let config = Config::new(&args);
-        std::env::remove_var("PUTIO_TOKEN");
-        assert!(config.is_err());
-        assert!(config.unwrap_err().contains("Invalid parent_id"));
+        let result = Config::try_parse_from(["putio", "not_a_number"]);
+        assert!(result.is_err());
     }
 
     #[test]
     fn config_invalid_max_display() {
-        std::env::set_var("PUTIO_TOKEN", "test_token");
-        let args: Vec<String> = vec![
-            String::from("putio"),
-            String::from("123"),
-            String::from("not_a_number"),
-        ];
-        let config = Config::new(&args);
-        std::env::remove_var("PUTIO_TOKEN");
-        assert!(config.is_err());
-        assert!(config.unwrap_err().contains("Invalid max_display"));
+        let result = Config::try_parse_from(["putio", "123", "--max-display", "not_a_number"]);
+        assert!(result.is_err());
     }
 }
