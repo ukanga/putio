@@ -339,96 +339,93 @@ fn file_url(client: &Client, file_id: i64) -> Result<String, Box<dyn Error>> {
     }
 }
 
-fn is_unwanted_file(name: &str) -> bool {
-    let ext = name.rsplit('.').next().unwrap_or("").trim().to_lowercase();
-    let unwanted = ["exe", "nfo", "txt", "png"];
-    unwanted.contains(&ext.as_str())
+/// Entry point. Dispatches to download or cleanup mode based on `config`.
+///
+/// # Errors
+///
+/// Returns any error from the put.io API or local filesystem operations.
+pub fn run(config: Config) -> Result<(), Box<dyn Error>> {
+    let client = Client::new(&config.oauth_token);
+    if !config.delete_type.is_empty() {
+        run_cleanup(&config, &client)
+    } else {
+        run_download(&config, &client)
+    }
 }
 
-pub fn run(config: Config) -> Result<(), Box<dyn Error>> {
+/// Download mode: list files (optionally filtered by `--file-type`), print
+/// download URLs for files not yet on disk, and clean up files that have
+/// already been downloaded locally.
+fn run_download(config: &Config, client: &Client) -> Result<(), Box<dyn Error>> {
     let stdout = io::stdout();
     let mut handle = stdout.lock();
     let path = Path::new(".");
     let downloaded_files = list_dir(path)?;
-    let client = Client::new(&config.oauth_token);
+    let file_type = config.file_type.map(FileType::as_str);
 
-    loop {
-        let files = files_list(
-            &client,
-            config.parent_id,
-            config.per_page,
-            config.file_type.map(FileType::as_str),
-        )?;
-        debug!("Total files to process: {}", files.len());
-        let mut num_ouputted: u32 = 0;
-        let mut unwanted_deleted: u32 = 0;
+    let files = files_list(client, config.parent_id, config.per_page, file_type)?;
+    debug!("Total files to process: {}", files.len());
+    let mut num_ouputted: u32 = 0;
 
-        for file in files {
-            debug!(
-                "Processing file: {} (type: {}, id: {})",
-                file.name, file.file_type, file.id
-            );
-            if file.file_type == "VIDEO" {
-                let download_url = file_url(&client, file.id)?;
-                if !downloaded_files.iter().any(|x| x == &file.name) {
-                    if config.max_display.is_none_or(|max| num_ouputted < max) {
-                        num_ouputted += 1;
-                        writeln!(handle, "{}", download_url)?;
-                    }
-                } else {
-                    // Delete the file first
-                    debug!("Deleting file with ID: {} (file: {})", file.id, file.name);
-                    delete_file(&client, file.id)?;
-                    // Check if the parent can now be deleted
-                    if file.parent_id != config.parent_id
-                        && parent_safe_to_delete(&client, &file, config.per_page)?
-                    {
-                        debug!(
-                            "Deleting parent directory with ID: {} (file: {})",
-                            file.parent_id, file.name
-                        );
-                        delete_file(&client, file.parent_id)?;
-                    }
-                    let completed_dir = Path::new("completed");
-                    if !completed_dir.is_dir() {
-                        fs::create_dir(completed_dir)?;
-                    }
-                    let completed_path = completed_dir.join(&file.name);
-                    fs::rename(&file.name, completed_path)?;
-                }
-            } else if file.file_type == "ARCHIVE"
-                || file.file_type == "IMAGE"
-                || is_unwanted_file(&file.name)
-            {
-                debug!("Deleting file with ID: {} (file: {})", file.id, file.name);
-                delete_file(&client, file.id)?;
-                unwanted_deleted += 1;
-                if file.parent_id != config.parent_id
-                    && parent_safe_to_delete(&client, &file, config.per_page)?
-                {
-                    debug!(
-                        "Deleting empty parent directory with ID: {} (file: {})",
-                        file.parent_id, file.name
-                    );
-                    delete_file(&client, file.parent_id)?;
-                }
-            } else {
-                debug!(
-                    "Found this other file {} of type {}",
-                    file.name, file.file_type
-                );
-            }
-        }
-
-        if num_ouputted > 0 || unwanted_deleted == 0 {
-            break;
-        }
+    for file in files {
         debug!(
-            "Deleted {} unwanted files, retrying files_list",
-            unwanted_deleted
+            "Processing file: {} (type: {}, id: {})",
+            file.name, file.file_type, file.id
         );
+        let download_url = file_url(client, file.id)?;
+        if !downloaded_files.iter().any(|x| x == &file.name) {
+            if config.max_display.is_none_or(|max| num_ouputted < max) {
+                num_ouputted += 1;
+                writeln!(handle, "{}", download_url)?;
+            }
+        } else {
+            debug!("Deleting file with ID: {} (file: {})", file.id, file.name);
+            delete_file(client, file.id)?;
+            if file.parent_id != config.parent_id
+                && parent_safe_to_delete(client, &file, config.per_page)?
+            {
+                debug!(
+                    "Deleting parent directory with ID: {} (file: {})",
+                    file.parent_id, file.name
+                );
+                delete_file(client, file.parent_id)?;
+            }
+            let completed_dir = Path::new("completed");
+            if !completed_dir.is_dir() {
+                fs::create_dir(completed_dir)?;
+            }
+            let completed_path = completed_dir.join(&file.name);
+            fs::rename(&file.name, completed_path)?;
+        }
     }
 
+    Ok(())
+}
+
+/// Cleanup mode: for each `--delete-type`, list matching files on put.io
+/// and delete them. Empty parent folders are removed when safe.
+fn run_cleanup(config: &Config, client: &Client) -> Result<(), Box<dyn Error>> {
+    for delete_type in &config.delete_type {
+        let type_name = delete_type.as_str();
+        let files = files_list(client, config.parent_id, config.per_page, Some(type_name))?;
+        debug!("Cleanup: found {} files of type {}", files.len(), type_name);
+        for file in files {
+            debug!(
+                "Deleting file with ID: {} (file: {}, type: {})",
+                file.id, file.name, file.file_type
+            );
+            delete_file(client, file.id)?;
+            if file.parent_id != config.parent_id
+                && parent_safe_to_delete(client, &file, config.per_page)?
+            {
+                debug!(
+                    "Deleting empty parent directory with ID: {} (file: {})",
+                    file.parent_id, file.name
+                );
+                delete_file(client, file.parent_id)?;
+            }
+        }
+    }
     Ok(())
 }
 
