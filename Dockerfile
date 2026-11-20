@@ -1,7 +1,7 @@
-FROM rust:1.86 AS builder
+FROM rust:1.97 AS builder
 WORKDIR /putio/
 COPY ./ ./
-RUN cargo build --release
+RUN cargo build --release --locked
 
 # Unfortunately some of the CLI dependencies do not allow building a
 # statically linked binary. Using Ubuntu as the runner instead of a
