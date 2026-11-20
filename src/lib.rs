@@ -193,7 +193,12 @@ fn delete_file(client: &Client, file_id: i64) -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
-fn files_list(client: &Client, parent_id: i64, per_page: i8) -> Result<Vec<File>, Box<dyn Error>> {
+/// Fetch one page of files from put.io for a given `parent_id`.
+fn fetch_files_page(
+    client: &Client,
+    parent_id: i64,
+    per_page: i8,
+) -> Result<Vec<File>, Box<dyn Error>> {
     let url = format!(
         "https://api.put.io/v2/files/list?parent_id={}&per_page={}",
         parent_id, per_page
@@ -203,7 +208,6 @@ fn files_list(client: &Client, parent_id: i64, per_page: i8) -> Result<Vec<File>
         parent_id, per_page
     );
     let response = client.get(&url)?.send()?;
-    let mut files: Vec<File> = Vec::new();
     if response.status().is_success() {
         let response_files: Files = response.json()?;
         debug!(
@@ -211,14 +215,7 @@ fn files_list(client: &Client, parent_id: i64, per_page: i8) -> Result<Vec<File>
             response_files.files.len(),
             response_files.status
         );
-        for file in response_files.files {
-            if file.file_type == "FOLDER" {
-                let folder = files_list(client, file.id, per_page)?;
-                files.extend(folder);
-            } else {
-                files.push(file);
-            }
-        }
+        Ok(response_files.files)
     } else {
         let status = response.status();
         debug!(
@@ -232,10 +229,23 @@ fn files_list(client: &Client, parent_id: i64, per_page: i8) -> Result<Vec<File>
                     .unwrap_or_else(|| format!("HTTP {}", status))
             })
             .unwrap_or_else(|_| format!("HTTP {}", status));
-        return Err(Box::new(PutioError(format!(
+        Err(Box::new(PutioError(format!(
             "Error listing files for parent_id={}: {}",
             parent_id, error_msg
-        ))));
+        ))))
+    }
+}
+
+/// Recursively list files under `parent_id`, descending into subfolders.
+fn files_list(client: &Client, parent_id: i64, per_page: i8) -> Result<Vec<File>, Box<dyn Error>> {
+    let mut files: Vec<File> = Vec::new();
+    for file in fetch_files_page(client, parent_id, per_page)? {
+        if file.file_type == "FOLDER" {
+            let folder = files_list(client, file.id, per_page)?;
+            files.extend(folder);
+        } else {
+            files.push(file);
+        }
     }
 
     Ok(files)
