@@ -441,7 +441,16 @@ fn parent_safe_to_delete(
     // Always ask for VIDEO, whatever the caller filtered on: the rule is
     // "keep folders that still hold videos", and a FILE or IMAGE filter
     // would hide every video sibling from this check.
-    let files = files_list(client, file.parent_id, per_page, Some("VIDEO"))?;
+    //
+    // One more entry than the caller's per_page, so the listing has room for
+    // the just-deleted file (put.io may still list it) and for at least one
+    // survivor. At per_page=1 the check would otherwise be blind.
+    let files = files_list(
+        client,
+        file.parent_id,
+        per_page.saturating_add(1),
+        Some("VIDEO"),
+    )?;
     debug!("Found {} total files in parent directory", files.len());
     for file_in_dir in files {
         debug!(
