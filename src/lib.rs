@@ -193,6 +193,16 @@ fn delete_file(client: &Client, file_id: i64) -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
+/// The `error_message` put.io returned for a failed request, or the status
+/// itself when the body does not parse as an error.
+fn api_error_message(response: reqwest::blocking::Response, status: reqwest::StatusCode) -> String {
+    response
+        .json::<ApiError>()
+        .ok()
+        .and_then(|e| e.error_message)
+        .unwrap_or_else(|| format!("HTTP {}", status))
+}
+
 /// Fetch one page of files from put.io for a given `parent_id`.
 fn fetch_files_page(
     client: &Client,
@@ -222,16 +232,10 @@ fn fetch_files_page(
             "files_list failed for parent_id={}: HTTP {}",
             parent_id, status
         );
-        let error_msg = response
-            .json::<ApiError>()
-            .map(|e| {
-                e.error_message
-                    .unwrap_or_else(|| format!("HTTP {}", status))
-            })
-            .unwrap_or_else(|_| format!("HTTP {}", status));
         Err(Box::new(PutioError(format!(
             "Error listing files for parent_id={}: {}",
-            parent_id, error_msg
+            parent_id,
+            api_error_message(response, status)
         ))))
     }
 }
@@ -262,16 +266,10 @@ fn file_url(client: &Client, file_id: i64) -> Result<String, Box<dyn Error>> {
     } else {
         let status = response.status();
         debug!("file_url failed for file_id={}: HTTP {}", file_id, status);
-        let error_msg = response
-            .json::<ApiError>()
-            .map(|e| {
-                e.error_message
-                    .unwrap_or_else(|| format!("HTTP {}", status))
-            })
-            .unwrap_or_else(|_| format!("HTTP {}", status));
         Err(Box::new(PutioError(format!(
             "Error fetching download url for file_id={}: {}",
-            file_id, error_msg
+            file_id,
+            api_error_message(response, status)
         ))))
     }
 }
