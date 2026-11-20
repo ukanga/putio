@@ -1,5 +1,5 @@
 use clap::{Parser, ValueEnum};
-use log::debug;
+use log::{debug, warn};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::error::Error;
@@ -484,15 +484,7 @@ fn run_download(config: &Config, client: &Client) -> Result<(), Box<dyn Error>> 
             // so a delete that did not take means a later run downloads the
             // file again. Failing here leaves both copies in place to retry.
             delete_file(client, file.id)?;
-            if file.parent_id != config.parent_id
-                && parent_safe_to_delete(client, &file, config.per_page)?
-            {
-                debug!(
-                    "Deleting parent directory with ID: {} (file: {})",
-                    file.parent_id, file.name
-                );
-                delete_file(client, file.parent_id)?;
-            }
+            delete_parent_if_empty(client, &file, config)?;
             let completed_dir = Path::new("completed");
             if !completed_dir.is_dir() {
                 fs::create_dir(completed_dir)?;
@@ -518,16 +510,37 @@ fn run_cleanup(config: &Config, client: &Client) -> Result<(), Box<dyn Error>> {
                 file.id, file.name, file.file_type
             );
             delete_file(client, file.id)?;
-            if file.parent_id != config.parent_id
-                && parent_safe_to_delete(client, &file, config.per_page)?
-            {
-                debug!(
-                    "Deleting empty parent directory with ID: {} (file: {})",
-                    file.parent_id, file.name
-                );
-                delete_file(client, file.parent_id)?;
-            }
+            delete_parent_if_empty(client, &file, config)?;
         }
+    }
+    Ok(())
+}
+
+/// Delete `file`'s parent folder if the file came from a subfolder that is now
+/// empty of videos.
+///
+/// Best-effort, unlike the file delete that precedes it: that one has already
+/// succeeded, so aborting here would leave the file gone from put.io with the
+/// run unfinished. An empty folder left behind costs nothing and the next run
+/// tries again.
+fn delete_parent_if_empty(
+    client: &Client,
+    file: &File,
+    config: &Config,
+) -> Result<(), Box<dyn Error>> {
+    if file.parent_id == config.parent_id || !parent_safe_to_delete(client, file, config.per_page)?
+    {
+        return Ok(());
+    }
+    debug!(
+        "Deleting empty parent directory with ID: {} (file: {})",
+        file.parent_id, file.name
+    );
+    if let Err(e) = delete_file(client, file.parent_id) {
+        warn!(
+            "Could not delete parent directory {} (file: {}): {}",
+            file.parent_id, file.name, e
+        );
     }
     Ok(())
 }
