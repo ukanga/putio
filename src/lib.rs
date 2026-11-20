@@ -135,6 +135,62 @@ impl Client {
     }
 }
 
+/// Number of additional attempts after the first try fails transiently.
+const MAX_RETRIES: u32 = 3;
+/// Base backoff between retries; doubled each attempt (0.5s, 1s, 2s).
+const RETRY_BASE_DELAY_MS: u64 = 500;
+
+/// Send `builder`, retrying on transient transport errors (e.g. the
+/// intermittent TLS "bad record mac" failures seen against api.put.io) and on
+/// retryable HTTP statuses (429 throttling and 5xx). Uses exponential backoff.
+///
+/// Non-retryable responses (success, 4xx other than 429) are returned as-is so
+/// callers keep their existing status handling.
+fn send_with_retry(
+    builder: reqwest::blocking::RequestBuilder,
+) -> Result<reqwest::blocking::Response, Box<dyn Error>> {
+    let mut attempt: u32 = 0;
+    loop {
+        let attempt_builder = builder
+            .try_clone()
+            .ok_or_else(|| PutioError("request is not cloneable, cannot retry".to_string()))?;
+        match attempt_builder.send() {
+            Ok(response) => {
+                let status = response.status();
+                let retryable =
+                    status == reqwest::StatusCode::TOO_MANY_REQUESTS || status.is_server_error();
+                if retryable && attempt < MAX_RETRIES {
+                    let delay = RETRY_BASE_DELAY_MS << attempt;
+                    debug!(
+                        "Retryable HTTP {} (retry {}/{}), backing off {}ms",
+                        status,
+                        attempt + 1,
+                        MAX_RETRIES,
+                        delay
+                    );
+                    std::thread::sleep(std::time::Duration::from_millis(delay));
+                    attempt += 1;
+                    continue;
+                }
+                return Ok(response);
+            }
+            Err(e) if attempt < MAX_RETRIES => {
+                let delay = RETRY_BASE_DELAY_MS << attempt;
+                debug!(
+                    "Transport error '{}' (retry {}/{}), backing off {}ms",
+                    e,
+                    attempt + 1,
+                    MAX_RETRIES,
+                    delay
+                );
+                std::thread::sleep(std::time::Duration::from_millis(delay));
+                attempt += 1;
+            }
+            Err(e) => return Err(Box::new(e)),
+        }
+    }
+}
+
 /// Represents the Put.io API error response body.
 ///
 /// Returned by the API when a request fails (e.g., file not found).
@@ -216,14 +272,15 @@ fn list_dir(dir: &Path) -> io::Result<Vec<String>> {
 fn delete_file(client: &Client, file_id: i64) -> Result<(), Box<dyn Error>> {
     let url = "https://api.put.io/v2/files/delete".to_string();
     let body = json!({ "file_ids": file_id }).to_string();
-    let _response = client
-        .post(&url)?
-        .header(
-            reqwest::header::CONTENT_TYPE,
-            reqwest::header::HeaderValue::from_static("application/json"),
-        )
-        .body(body)
-        .send()?;
+    let _response = send_with_retry(
+        client
+            .post(&url)?
+            .header(
+                reqwest::header::CONTENT_TYPE,
+                reqwest::header::HeaderValue::from_static("application/json"),
+            )
+            .body(body),
+    )?;
 
     Ok(())
 }
@@ -258,7 +315,7 @@ fn fetch_files_page(
         "Listing files for parent_id={} per_page={} file_type={:?}",
         parent_id, per_page, file_type
     );
-    let response = client.get(&url)?.send()?;
+    let response = send_with_retry(client.get(&url)?)?;
     if response.status().is_success() {
         let response_files: Files = response.json()?;
         debug!(
@@ -323,7 +380,7 @@ fn files_list(
 fn file_url(client: &Client, file_id: i64) -> Result<String, Box<dyn Error>> {
     let url = format!("https://api.put.io/v2/files/{}/url", file_id);
     debug!("Fetching download URL for file_id={}", file_id);
-    let response = client.get(&url)?.send()?;
+    let response = send_with_retry(client.get(&url)?)?;
     if response.status().is_success() {
         let file_url: FileURL = response.json()?;
         debug!("Got download URL for file_id={}", file_id);
