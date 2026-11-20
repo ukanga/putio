@@ -269,10 +269,16 @@ fn list_dir(dir: &Path) -> io::Result<Vec<String>> {
     Ok(files)
 }
 
+/// Delete a file or folder from put.io.
+///
+/// A refused delete is an error, because callers act on success: `run_download`
+/// moves the local copy away once put.io confirms its copy is gone. A 404, or a
+/// `FileNotFound` body under any status, counts as deleted, so a delete retried
+/// after an earlier run removed the file does not fail forever.
 fn delete_file(client: &Client, file_id: i64) -> Result<(), Box<dyn Error>> {
     let url = "https://api.put.io/v2/files/delete".to_string();
     let body = json!({ "file_ids": file_id }).to_string();
-    let _response = send_with_retry(
+    let response = send_with_retry(
         client
             .post(&url)?
             .header(
@@ -282,7 +288,41 @@ fn delete_file(client: &Client, file_id: i64) -> Result<(), Box<dyn Error>> {
             .body(body),
     )?;
 
-    Ok(())
+    let status = response.status();
+    if status.is_success() {
+        debug!("Deleted file_id={}", file_id);
+        return Ok(());
+    }
+    delete_outcome(file_id, status, response.json::<ApiError>().ok())
+}
+
+/// What a non-success response to a delete means. Separate from the request so
+/// it can be tested without an HTTP server.
+fn delete_outcome(
+    file_id: i64,
+    status: reqwest::StatusCode,
+    error: Option<ApiError>,
+) -> Result<(), Box<dyn Error>> {
+    let already_gone = status == reqwest::StatusCode::NOT_FOUND
+        || error
+            .as_ref()
+            .and_then(|e| e.error_type.as_deref())
+            .is_some_and(|t| t == "FileNotFound");
+    if already_gone {
+        debug!(
+            "file_id={} is already absent from put.io (HTTP {}), counting as deleted",
+            file_id, status
+        );
+        return Ok(());
+    }
+
+    let error_msg = error
+        .and_then(|e| e.error_message)
+        .unwrap_or_else(|| format!("HTTP {}", status));
+    Err(Box::new(PutioError(format!(
+        "Error deleting file_id={}: {}",
+        file_id, error_msg
+    ))))
 }
 
 /// The `error_message` put.io returned for a failed request, or the status
@@ -440,6 +480,9 @@ fn run_download(config: &Config, client: &Client) -> Result<(), Box<dyn Error>> 
             }
         } else {
             debug!("Deleting file with ID: {} (file: {})", file.id, file.name);
+            // Strict: the rename below moves the local copy out of the way,
+            // so a delete that did not take means a later run downloads the
+            // file again. Failing here leaves both copies in place to retry.
             delete_file(client, file.id)?;
             if file.parent_id != config.parent_id
                 && parent_safe_to_delete(client, &file, config.per_page)?
@@ -616,6 +659,61 @@ mod tests {
             .map_err(|e| e.to_string())?;
         assert_eq!(config.file_type, Some(FileType::Video));
         Ok(())
+    }
+
+    fn api_error(error_type: Option<&str>, message: Option<&str>) -> ApiError {
+        ApiError {
+            error_type: error_type.map(String::from),
+            error_message: message.map(String::from),
+            status_code: None,
+        }
+    }
+
+    /// A throttled delete must be an error: the caller moves the local copy
+    /// away on success, and put.io still holds its own.
+    #[test]
+    fn delete_outcome_throttled_is_an_error() {
+        let err = delete_outcome(
+            42,
+            reqwest::StatusCode::TOO_MANY_REQUESTS,
+            Some(api_error(Some("Throttled"), Some("Too many requests."))),
+        )
+        .expect_err("a 429 must not count as deleted");
+        assert!(
+            err.to_string().contains("Too many requests."),
+            "the put.io message belongs in the error: {}",
+            err
+        );
+        assert!(err.to_string().contains("42"), "and the file id: {}", err);
+    }
+
+    #[test]
+    fn delete_outcome_server_error_is_an_error() {
+        assert!(delete_outcome(42, reqwest::StatusCode::INTERNAL_SERVER_ERROR, None).is_err());
+    }
+
+    /// A delete retried after an earlier run removed the file must not fail.
+    #[test]
+    fn delete_outcome_404_counts_as_deleted() {
+        assert!(delete_outcome(42, reqwest::StatusCode::NOT_FOUND, None).is_ok());
+    }
+
+    #[test]
+    fn delete_outcome_file_not_found_body_counts_as_deleted() {
+        assert!(delete_outcome(
+            42,
+            reqwest::StatusCode::BAD_REQUEST,
+            Some(api_error(Some("FileNotFound"), Some("File not found."))),
+        )
+        .is_ok());
+    }
+
+    /// An unparseable body must still fail, with the status as the message.
+    #[test]
+    fn delete_outcome_unreadable_body_still_fails_with_the_status() {
+        let err = delete_outcome(42, reqwest::StatusCode::BAD_REQUEST, None)
+            .expect_err("a 400 must not count as deleted");
+        assert!(err.to_string().contains("400"), "{}", err);
     }
 
     #[test]
