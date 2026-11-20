@@ -1,4 +1,4 @@
-use clap::Parser;
+use clap::{Parser, ValueEnum};
 use log::debug;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -19,6 +19,44 @@ impl fmt::Display for PutioError {
 }
 impl Error for PutioError {}
 
+/// A put.io file type, as reported by the API and accepted by `--file-type`
+/// and `--delete-type`.
+///
+/// `FOLDER` is deliberately absent: deleting a folder on put.io deletes
+/// everything inside it, so it is not something either flag should accept.
+#[derive(ValueEnum, Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FileType {
+    #[value(name = "VIDEO")]
+    Video,
+    #[value(name = "AUDIO")]
+    Audio,
+    #[value(name = "IMAGE")]
+    Image,
+    #[value(name = "ARCHIVE")]
+    Archive,
+    #[value(name = "PDF")]
+    Pdf,
+    #[value(name = "TEXT")]
+    Text,
+    #[value(name = "FILE")]
+    File,
+}
+
+impl FileType {
+    /// The name the put.io API uses for this type.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            FileType::Video => "VIDEO",
+            FileType::Audio => "AUDIO",
+            FileType::Image => "IMAGE",
+            FileType::Archive => "ARCHIVE",
+            FileType::Pdf => "PDF",
+            FileType::Text => "TEXT",
+            FileType::File => "FILE",
+        }
+    }
+}
+
 /// Command-line configuration for the put.io tool.
 ///
 /// `parent_id` is required and positional. The OAuth token is read from the
@@ -36,6 +74,18 @@ pub struct Config {
     /// Results per API page
     #[arg(long, default_value_t = 1)]
     pub per_page: i8,
+
+    /// Filter download mode to a single file type.
+    ///
+    /// Mutually exclusive with `--delete-type`.
+    #[arg(long, value_enum, ignore_case = true)]
+    pub file_type: Option<FileType>,
+
+    /// File types to delete from put.io (repeatable). Activates cleanup mode.
+    ///
+    /// Mutually exclusive with `--file-type`.
+    #[arg(long, value_enum, ignore_case = true, conflicts_with = "file_type")]
+    pub delete_type: Vec<FileType>,
 
     /// OAuth token, populated from the `PUTIO_TOKEN` environment variable.
     #[arg(skip)]
@@ -409,6 +459,58 @@ mod tests {
         resolved.map_err(|e| e.to_string())?;
         assert_eq!(config.oauth_token, "test_token_from_env");
         assert_eq!(config.parent_id, 921234);
+        Ok(())
+    }
+
+    #[test]
+    fn config_file_type_and_delete_type_conflict() {
+        let result = Config::try_parse_from([
+            "putio",
+            "921234",
+            "--file-type",
+            "VIDEO",
+            "--delete-type",
+            "ARCHIVE",
+        ]);
+        assert!(
+            result.is_err(),
+            "--file-type and --delete-type must be mutually exclusive"
+        );
+    }
+
+    #[test]
+    fn config_delete_type_repeatable() -> Result<(), String> {
+        let config = Config::try_parse_from([
+            "putio",
+            "921234",
+            "--delete-type",
+            "ARCHIVE",
+            "--delete-type",
+            "IMAGE",
+        ])
+        .map_err(|e| e.to_string())?;
+        assert_eq!(config.delete_type, vec![FileType::Archive, FileType::Image]);
+        Ok(())
+    }
+
+    #[test]
+    fn config_rejects_unknown_file_type() {
+        let result = Config::try_parse_from(["putio", "921234", "--file-type", "VIDEOS"]);
+        assert!(result.is_err(), "a typo must not be passed to the API");
+    }
+
+    /// Deleting a folder on put.io deletes everything inside it.
+    #[test]
+    fn config_rejects_folder_as_a_delete_type() {
+        let result = Config::try_parse_from(["putio", "921234", "--delete-type", "FOLDER"]);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn config_file_type_is_case_insensitive() -> Result<(), String> {
+        let config = Config::try_parse_from(["putio", "921234", "--file-type", "video"])
+            .map_err(|e| e.to_string())?;
+        assert_eq!(config.file_type, Some(FileType::Video));
         Ok(())
     }
 
