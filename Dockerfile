@@ -10,4 +10,6 @@ RUN cargo build --release --locked
 # libc the binary is built using.
 FROM ubuntu:24.04 AS runner
 COPY --from=builder /putio/target/release/putio /usr/bin/putio
-RUN apt update && apt install -y aria2 wget curl
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends aria2 wget curl ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
