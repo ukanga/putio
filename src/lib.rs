@@ -429,9 +429,12 @@ fn run_download(config: &Config, client: &Client) -> Result<(), Box<dyn Error>> 
             "Processing file: {} (type: {}, id: {})",
             file.name, file.file_type, file.id
         );
-        let download_url = file_url(client, file.id)?;
         if !downloaded_files.iter().any(|x| x == &file.name) {
             if config.max_display.is_none_or(|max| num_ouputted < max) {
+                // Only this arm needs a URL. A file already on disk is about
+                // to be deleted from put.io, and one past `max_display` is not
+                // being downloaded this run.
+                let download_url = file_url(client, file.id)?;
                 num_ouputted += 1;
                 writeln!(handle, "{}", download_url)?;
             }
