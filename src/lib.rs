@@ -62,7 +62,9 @@ impl FileType {
 /// `parent_id` is required and positional. The OAuth token is read from the
 /// `PUTIO_TOKEN` environment variable in [`Config::resolve_token`].
 #[derive(Parser, Debug)]
-#[command(about = "List, download, and clean up files on put.io")]
+// long_about = None keeps the rustdoc above out of --help, which is written for
+// someone running the binary, not reading the crate.
+#[command(about = "List, download, and clean up files on put.io", long_about = None)]
 pub struct Config {
     /// Parent folder ID on put.io
     pub parent_id: i64,
