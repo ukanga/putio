@@ -238,19 +238,25 @@ fn api_error_message(response: reqwest::blocking::Response, status: reqwest::Sta
         .unwrap_or_else(|| format!("HTTP {}", status))
 }
 
-/// Fetch one page of files from put.io for a given `parent_id`.
+/// Fetch one page of files from put.io for a given `parent_id`, optionally
+/// filtered by `file_type` (e.g. `Some("VIDEO")`, `Some("FOLDER")`).
 fn fetch_files_page(
     client: &Client,
     parent_id: i64,
     per_page: i8,
+    file_type: Option<&str>,
 ) -> Result<Vec<File>, Box<dyn Error>> {
-    let url = format!(
+    let mut url = format!(
         "https://api.put.io/v2/files/list?parent_id={}&per_page={}",
         parent_id, per_page
     );
+    if let Some(ft) = file_type {
+        url.push_str("&file_type=");
+        url.push_str(ft);
+    }
     debug!(
-        "Listing files for parent_id={} per_page={}",
-        parent_id, per_page
+        "Listing files for parent_id={} per_page={} file_type={:?}",
+        parent_id, per_page, file_type
     );
     let response = client.get(&url)?.send()?;
     if response.status().is_success() {
@@ -275,15 +281,39 @@ fn fetch_files_page(
     }
 }
 
-/// Recursively list files under `parent_id`, descending into subfolders.
-fn files_list(client: &Client, parent_id: i64, per_page: i8) -> Result<Vec<File>, Box<dyn Error>> {
+/// Recursively list files under `parent_id`, optionally filtered by `file_type`.
+///
+/// When `file_type` is `Some(t)`, the API returns only files of that type, so
+/// folders are fetched separately to drive recursion. When `None`, a single
+/// unfiltered call is used and folders are discovered inline.
+fn files_list(
+    client: &Client,
+    parent_id: i64,
+    per_page: i8,
+    file_type: Option<&str>,
+) -> Result<Vec<File>, Box<dyn Error>> {
     let mut files: Vec<File> = Vec::new();
-    for file in fetch_files_page(client, parent_id, per_page)? {
-        if file.file_type == "FOLDER" {
-            let folder = files_list(client, file.id, per_page)?;
-            files.extend(folder);
-        } else {
-            files.push(file);
+
+    if let Some(ft) = file_type {
+        // Fetch + recurse into subfolders.
+        let folders = fetch_files_page(client, parent_id, per_page, Some("FOLDER"))?;
+        for folder in folders {
+            let sub = files_list(client, folder.id, per_page, Some(ft))?;
+            files.extend(sub);
+        }
+        // Fetch the requested type.
+        let matched = fetch_files_page(client, parent_id, per_page, Some(ft))?;
+        files.extend(matched);
+    } else {
+        // Unfiltered: one call, recurse on FOLDER inline, return everything else.
+        let page = fetch_files_page(client, parent_id, per_page, None)?;
+        for file in page {
+            if file.file_type == "FOLDER" {
+                let sub = files_list(client, file.id, per_page, None)?;
+                files.extend(sub);
+            } else {
+                files.push(file);
+            }
         }
     }
 
@@ -323,7 +353,12 @@ pub fn run(config: Config) -> Result<(), Box<dyn Error>> {
     let client = Client::new(&config.oauth_token);
 
     loop {
-        let files = files_list(&client, config.parent_id, config.per_page)?;
+        let files = files_list(
+            &client,
+            config.parent_id,
+            config.per_page,
+            config.file_type.map(FileType::as_str),
+        )?;
         debug!("Total files to process: {}", files.len());
         let mut num_ouputted: u32 = 0;
         let mut unwanted_deleted: u32 = 0;
@@ -406,7 +441,10 @@ fn parent_safe_to_delete(
         "Checking if parent {} is safe to delete (file: {})",
         file.parent_id, file.name
     );
-    let files = files_list(client, file.parent_id, per_page)?;
+    // Always ask for VIDEO, whatever the caller filtered on: the rule is
+    // "keep folders that still hold videos", and a FILE or IMAGE filter
+    // would hide every video sibling from this check.
+    let files = files_list(client, file.parent_id, per_page, Some("VIDEO"))?;
     debug!("Found {} total files in parent directory", files.len());
     for file_in_dir in files {
         debug!(
