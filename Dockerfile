@@ -1,4 +1,9 @@
 FROM rust:1.97 AS builder
+# aws-lc-rs, the crypto library behind reqwest's rustls backend, builds with
+# cmake, which the rust image does not ship.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends cmake \
+    && rm -rf /var/lib/apt/lists/*
 WORKDIR /putio/
 COPY ./ ./
 RUN cargo build --release --locked
