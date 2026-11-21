@@ -1,11 +1,37 @@
-repos:
--   repo: https://github.com/pre-commit/pre-commit-hooks
-    rev: v1.2.3
-    hooks:
-    -   id: trailing-whitespace
+# Commits get the fast checks; clippy and the tests wait for a push.
+default_install_hook_types: ["pre-commit", "pre-push"]
 
--   repo: https://github.com/doublify/pre-commit-rust
-    rev: master
+repos:
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v6.0.0
     hooks:
-    -   id: fmt
-    -   id: cargo-check
+      - id: trailing-whitespace
+      - id: check-yaml
+      - id: check-toml
+
+  # The same commands CI runs, so what passes here passes there.
+  # language: system uses the toolchain already installed for the project.
+  - repo: local
+    hooks:
+      - id: cargo-fmt
+        name: cargo fmt
+        entry: cargo fmt --check
+        language: system
+        files: \.rs$
+        pass_filenames: false
+
+      - id: cargo-clippy
+        name: cargo clippy
+        entry: cargo clippy --locked --all-targets -- -D warnings
+        language: system
+        files: \.rs$|^Cargo\.(toml|lock)$
+        pass_filenames: false
+        stages: [pre-push]
+
+      - id: cargo-test
+        name: cargo test
+        entry: cargo test --locked
+        language: system
+        files: \.rs$|^Cargo\.(toml|lock)$
+        pass_filenames: false
+        stages: [pre-push]
