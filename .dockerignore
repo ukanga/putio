@@ -3,10 +3,6 @@ Dockerfile
 .github
 target
 .claude
-
-# The Dockerfile copies the whole tree into the builder, and a build layer
-# keeps whatever it is given even if a later layer deletes it. A token file
-# left in the working tree must not become part of an image.
 .env
 .env.*
 *.token

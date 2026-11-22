@@ -52,9 +52,8 @@ impl FileType {
 
 /// Command-line configuration for the put.io tool.
 ///
-/// `parent_id` is required and positional. The OAuth token is never a flag —
-/// that would put it in `ps` output and shell history — and is found by
-/// [`Config::resolve_token`] from one of the sources in [`token::resolve`].
+/// `parent_id` is required and positional. The OAuth token is not a flag; it
+/// is found by [`Config::resolve_token`].
 #[derive(Parser, Debug)]
 // long_about = None keeps the rustdoc above out of --help, which is written for
 // someone running the binary, not reading the crate.
@@ -115,23 +114,18 @@ pub struct Config {
     #[arg(long, conflicts_with = "parent_id")]
     pub logout: bool,
 
-    /// OAuth token, found by [`Config::resolve_token`]. Not a flag.
     #[arg(skip)]
     pub oauth_token: Token,
 }
 
 impl Config {
-    /// The folder to act on.
-    ///
-    /// Clap requires `parent_id` unless `--login` or `--logout` was given, and
-    /// [`run`] handles those before anything needs a folder.
     fn folder_id(&self) -> i64 {
         self.parent_id
             .expect("clap requires parent_id outside --login/--logout")
     }
 
-    /// Find the OAuth token, from `--token-command`, `--token-file`,
-    /// `$PUTIO_TOKEN` or the default token file, in that order.
+    /// Find the OAuth token. See [`token::resolve`] for the sources and their
+    /// order.
     ///
     /// # Errors
     ///
@@ -267,21 +261,11 @@ fn get_access_token_header(access_token: &str) -> String {
     format!("Token {}", access_token)
 }
 
-/// Build the `Authorization` header.
-///
-/// The token travels in a header and never in a URL or query parameter, so it
-/// stays out of server logs, proxy logs and anything that prints a request's
-/// URL. reqwest strips `Authorization` on a cross-host redirect, so a
-/// redirected API call cannot carry it to another origin.
 fn get_authorization_header(oauth_token: &Token) -> Result<reqwest::header::HeaderMap> {
     let token = get_access_token_header(oauth_token.expose());
     let mut headers = reqwest::header::HeaderMap::with_capacity(1);
     let mut value = reqwest::header::HeaderValue::from_str(&token)
-        // `InvalidHeaderValue` does not quote the offending value, and
-        // `Token::parse` has already rejected anything that could land here.
         .context("the put.io token cannot be sent in an HTTP header")?;
-    // Keeps the token out of any `{:?}` of the header map, the request
-    // builder, or a reqwest error that carries one.
     value.set_sensitive(true);
     headers.insert(reqwest::header::AUTHORIZATION, value);
 
@@ -480,9 +464,6 @@ fn file_url(client: &Client, file_id: i64) -> Result<String> {
 /// Entry point. Handles the keyring flags, then dispatches to download or
 /// cleanup mode based on `config`.
 ///
-/// Token resolution happens here rather than in `main`, so `--login` can run
-/// on a machine that has no token yet.
-///
 /// # Errors
 ///
 /// Returns any error from token resolution, the put.io API, or local
@@ -644,15 +625,12 @@ mod tests {
     // test's read.
     static ENV_LOCK: Mutex<()> = Mutex::new(());
 
-    /// Point the chain's last two sources at nothing, so a test that means to
-    /// exercise one source can't pick up a real token from the developer's own
-    /// environment. Caller holds `ENV_LOCK`.
+    /// Stops a test picking up a real token from the developer's environment.
+    /// Caller holds `ENV_LOCK`.
     fn clear_token_env() {
         std::env::remove_var("PUTIO_TOKEN");
         std::env::remove_var("PUTIO_TOKEN_COMMAND");
         std::env::remove_var("PUTIO_TOKEN_FILE");
-        // An empty-but-set XDG_CONFIG_HOME is ignored, so point it at a path
-        // that cannot hold a token file.
         std::env::set_var("XDG_CONFIG_HOME", "/nonexistent-putio-test-config");
     }
 
@@ -662,10 +640,8 @@ mod tests {
         assert!(result.is_err(), "Should fail when parent_id is missing");
     }
 
-    /// With no source set at all, the error has to teach the chain rather than
-    /// name one variable.
     #[test]
-    fn config_resolve_token_no_source() {
+    fn config_resolve_token_no_source_lists_every_source() {
         let _guard = ENV_LOCK.lock().unwrap();
         clear_token_env();
         let mut config = Config::try_parse_from(["putio", "921234"]).expect("parse");
@@ -690,7 +666,6 @@ mod tests {
         Ok(())
     }
 
-    /// `--login` and `--logout` are the only ways to run without a folder id.
     #[test]
     fn config_login_needs_no_parent_id() -> Result<(), String> {
         let config = Config::try_parse_from(["putio", "--login"]).map_err(|e| e.to_string())?;
@@ -712,16 +687,12 @@ mod tests {
         assert!(result.is_err());
     }
 
-    /// A folder id alongside `--login` means the two were confused for each
-    /// other; refusing beats listing a folder the user did not mean.
     #[test]
     fn config_login_rejects_a_parent_id() {
         let result = Config::try_parse_from(["putio", "--login", "921234"]);
         assert!(result.is_err());
     }
 
-    /// A token command is the recommended source: it keeps the secret in
-    /// `pass`, `gpg`, `op` or a vault instead of in the environment.
     #[test]
     fn config_resolve_token_from_command() -> Result<(), String> {
         let _guard = ENV_LOCK.lock().unwrap();
@@ -738,10 +709,8 @@ mod tests {
         Ok(())
     }
 
-    /// An explicitly named command that fails must not fall through to a
-    /// weaker source: the user pointed at this one on purpose.
     #[test]
-    fn config_resolve_token_failing_command_does_not_fall_back() {
+    fn config_resolve_token_failing_command_does_not_fall_back_to_env() {
         let _guard = ENV_LOCK.lock().unwrap();
         clear_token_env();
         std::env::set_var("PUTIO_TOKEN", "token_from_env");
@@ -753,8 +722,6 @@ mod tests {
         assert!(err.to_string().contains("exit status 3"), "{}", err);
     }
 
-    /// The token command wins over the environment, so a machine that still
-    /// exports PUTIO_TOKEN can be migrated one command at a time.
     #[test]
     fn config_resolve_token_command_beats_env() -> Result<(), String> {
         let _guard = ENV_LOCK.lock().unwrap();
@@ -793,7 +760,6 @@ mod tests {
         Ok(())
     }
 
-    /// A token anyone on the host can read is not stored, just filed.
     #[cfg(unix)]
     #[test]
     fn config_resolve_token_rejects_a_world_readable_file() -> Result<(), String> {
@@ -814,7 +780,6 @@ mod tests {
         Ok(())
     }
 
-    /// The default token file is found without any flag or variable.
     #[test]
     fn config_resolve_token_from_the_default_file() -> Result<(), String> {
         let _guard = ENV_LOCK.lock().unwrap();
@@ -839,8 +804,6 @@ mod tests {
         Ok(())
     }
 
-    /// No `{:?}` anywhere may print the token: this is the whole reason
-    /// `oauth_token` is a [`Token`] and not a `String`.
     #[test]
     fn config_debug_does_not_leak_the_token() -> Result<(), String> {
         let _guard = ENV_LOCK.lock().unwrap();
@@ -856,7 +819,6 @@ mod tests {
         Ok(())
     }
 
-    /// Write a token file under the temp dir with an explicit mode.
     fn write_token_file(name: &str, contents: &str, mode: u32) -> Result<PathBuf, String> {
         let path =
             std::env::temp_dir().join(format!("putio-test-token-{}-{}", std::process::id(), name));
