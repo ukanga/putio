@@ -1,4 +1,4 @@
-use anyhow::{anyhow, bail, Result};
+use anyhow::{anyhow, bail, Context, Result};
 use clap::{Parser, ValueEnum};
 use log::{debug, warn};
 use serde::{Deserialize, Serialize};
@@ -177,7 +177,9 @@ fn send_with_retry(
                 std::thread::sleep(std::time::Duration::from_millis(delay));
                 attempt += 1;
             }
-            Err(e) => return Err(e.into()),
+            Err(e) => {
+                return Err(e).with_context(|| format!("giving up after {} retries", MAX_RETRIES))
+            }
         }
     }
 }
@@ -236,7 +238,7 @@ fn list_dir(dir: &Path) -> Result<Vec<String>> {
     let mut all_files: Vec<String> = Vec::new();
     let mut files: Vec<String> = Vec::new();
     if dir.is_dir() {
-        for entry in fs::read_dir(dir)? {
+        for entry in fs::read_dir(dir).with_context(|| format!("reading {}", dir.display()))? {
             let entry = entry?;
             let path = entry.path();
             let path = path.file_name().and_then(|n| n.to_str()).ok_or_else(|| {
@@ -472,10 +474,12 @@ fn run_download(config: &Config, client: &Client) -> Result<()> {
             delete_parent_if_empty(client, &file, config)?;
             let completed_dir = Path::new("completed");
             if !completed_dir.is_dir() {
-                fs::create_dir(completed_dir)?;
+                fs::create_dir(completed_dir)
+                    .with_context(|| format!("creating {}", completed_dir.display()))?;
             }
             let completed_path = completed_dir.join(&file.name);
-            fs::rename(&file.name, completed_path)?;
+            fs::rename(&file.name, &completed_path)
+                .with_context(|| format!("moving {} to {}", file.name, completed_path.display()))?;
         }
     }
 
