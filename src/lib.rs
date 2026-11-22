@@ -60,8 +60,6 @@ impl FileType {
 #[command(about = "List, download, and clean up files on put.io", long_about = None)]
 pub struct Config {
     /// Parent folder ID on put.io
-    ///
-    /// Required, except for `--login` and `--logout`, which touch no folder.
     #[arg(required_unless_present_any = ["login", "logout"])]
     pub parent_id: Option<i64>,
 
@@ -85,32 +83,19 @@ pub struct Config {
     #[arg(long, value_enum, ignore_case = true, conflicts_with = "file_type")]
     pub delete_type: Vec<FileType>,
 
-    /// Command whose first line of stdout is the put.io OAuth token.
-    ///
-    /// Run through the shell, so `pass putio/token`, `gpg -d ~/.putio.gpg`,
-    /// `op read op://private/putio/token` and the like all work. Takes
-    /// precedence over every other source.
+    /// Shell command printing the put.io OAuth token, e.g. 'pass putio/token'
     #[arg(long, env = "PUTIO_TOKEN_COMMAND", value_name = "CMD")]
     pub token_command: Option<String>,
 
-    /// File whose first line is the put.io OAuth token.
-    ///
-    /// Must not be readable by group or others. Takes precedence over
-    /// `$PUTIO_TOKEN` and the default token file.
+    /// File holding the put.io OAuth token, mode 0600
     #[arg(long, env = "PUTIO_TOKEN_FILE", value_name = "PATH")]
     pub token_file: Option<PathBuf>,
 
-    /// Store a put.io token in the OS keyring, then exit.
-    ///
-    /// Reads the token from stdin, so `pass putio/token | putio --login`
-    /// keeps it out of shell history. Needs the `keyring` feature.
+    /// Store the put.io OAuth token read from stdin in the OS keyring, then exit
     #[arg(long, conflicts_with_all = ["logout", "parent_id"])]
     pub login: bool,
 
-    /// Delete the put.io token from the OS keyring, then exit.
-    ///
-    /// Deleting is not revoking: the token keeps working until it is revoked
-    /// on put.io. Needs the `keyring` feature.
+    /// Delete the put.io OAuth token from the OS keyring, then exit
     #[arg(long, conflicts_with = "parent_id")]
     pub logout: bool,
 
