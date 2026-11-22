@@ -75,6 +75,9 @@ impl fmt::Debug for Token {
 ///    `LoadCredential=` hands a secret to a unit.
 /// 3. `$PUTIO_TOKEN` — what containers and CI want.
 /// 4. `$XDG_CONFIG_HOME/putio/token`, else `~/.config/putio/token`.
+/// 5. The OS keyring, when built with the `keyring` feature. Last, because it
+///    may unlock a keyring or prompt, and because there is no keyring service
+///    to talk to in a cron job or a container.
 ///
 /// There is deliberately no `--token` flag: that would put the token in `ps`
 /// output and in shell history for good.
@@ -104,6 +107,10 @@ pub fn resolve(command: Option<&str>, file: Option<&Path>) -> Result<Token> {
         }
         debug!("No token file at {}", path.display());
     }
+    #[cfg(feature = "keyring")]
+    if let Some(token) = from_keyring() {
+        return Ok(token);
+    }
     bail!("{}", no_token_help())
 }
 
@@ -113,12 +120,17 @@ fn no_token_help() -> String {
     let default_path = default_token_path()
         .map(|p| p.display().to_string())
         .unwrap_or_else(|| "~/.config/putio/token".to_string());
+    let keyring = if cfg!(feature = "keyring") {
+        "\n  the OS keyring  (putio --login)"
+    } else {
+        ""
+    };
     format!(
         "no put.io token found. Set one up with any of these, tried in this order:\n\
          \x20 --token-command CMD   ($PUTIO_TOKEN_COMMAND), e.g. --token-command 'pass putio/token'\n\
          \x20 --token-file PATH     ($PUTIO_TOKEN_FILE)\n\
          \x20 $PUTIO_TOKEN\n\
-         \x20 {default_path}       (mode 0600)\n\
+         \x20 {default_path}       (mode 0600){keyring}\n\
          Get a token from https://app.put.io/settings/account/oauth/apps"
     )
 }
@@ -219,6 +231,160 @@ fn default_token_path() -> Option<PathBuf> {
 /// first line and anything else after it.
 fn first_line(s: &str) -> &str {
     s.lines().find(|line| !line.trim().is_empty()).unwrap_or("")
+}
+
+/// The service and account names of the keyring entry: Keychain on macOS,
+/// Secret Service on *nix, Credential Manager on Windows.
+#[cfg(feature = "keyring")]
+const KEYRING_SERVICE: &str = "putio";
+#[cfg(feature = "keyring")]
+const KEYRING_USER: &str = "oauth-token";
+
+#[cfg(feature = "keyring")]
+fn keyring_entry() -> Result<keyring::Entry> {
+    keyring::Entry::new(KEYRING_SERVICE, KEYRING_USER)
+        .context("opening the OS keyring; is there a keyring service on this host?")
+}
+
+/// Look the token up in the OS keyring.
+///
+/// Every failure is `None`, not an error: a missing entry, a locked keyring and
+/// a host with no keyring service at all should all end in the "no token
+/// found" message that lists every source, not in a D-Bus error from a cron
+/// job that was never going to have a session bus.
+#[cfg(feature = "keyring")]
+fn from_keyring() -> Option<Token> {
+    let entry = match keyring_entry() {
+        Ok(entry) => entry,
+        Err(e) => {
+            debug!("No usable OS keyring: {:#}", e);
+            return None;
+        }
+    };
+    match entry.get_password() {
+        Ok(secret) => match Token::parse(&secret, "the OS keyring") {
+            Ok(token) => {
+                debug!("Resolved the token from the OS keyring");
+                Some(token)
+            }
+            Err(e) => {
+                debug!("Ignoring the OS keyring entry: {:#}", e);
+                None
+            }
+        },
+        Err(keyring::Error::NoEntry) => {
+            debug!("No put.io token in the OS keyring");
+            None
+        }
+        Err(e) => {
+            debug!("OS keyring lookup failed: {}", e);
+            None
+        }
+    }
+}
+
+/// `putio --login`: store a token in the OS keyring, read from stdin.
+///
+/// Piping is the point — `pass putio/token | putio --login` never puts the
+/// token in shell history. A terminal gets a warning that what it types is
+/// echoed, since reading without echo would mean another dependency.
+#[cfg(feature = "keyring")]
+pub fn login() -> Result<()> {
+    use std::io::{BufRead, IsTerminal, Read};
+
+    let mut input = String::new();
+    let stdin = std::io::stdin();
+    if stdin.is_terminal() {
+        eprintln!("Paste your put.io token and press Enter.");
+        eprintln!("It is echoed to the terminal; `pass putio/token | putio --login` is not.");
+        stdin
+            .lock()
+            .read_line(&mut input)
+            .context("reading the token from the terminal")?;
+    } else {
+        stdin
+            .lock()
+            .read_to_string(&mut input)
+            .context("reading the token from stdin")?;
+    }
+
+    let token = Token::parse(first_line(&input), "stdin")?;
+    keyring_entry()?
+        .set_password(token.expose())
+        .context("storing the token in the OS keyring")?;
+    eprintln!(
+        "Stored the put.io token in the OS keyring as {}/{}.",
+        KEYRING_SERVICE, KEYRING_USER
+    );
+    Ok(())
+}
+
+/// `putio --logout`: delete the token from the OS keyring.
+///
+/// This revokes nothing. A token that may have leaked has to be revoked at
+/// <https://app.put.io/settings/account/oauth/apps>, because put.io tokens do
+/// not expire on their own.
+#[cfg(feature = "keyring")]
+pub fn logout() -> Result<()> {
+    match keyring_entry()?.delete_credential() {
+        Ok(()) => {
+            eprintln!("Deleted the put.io token from the OS keyring.");
+            eprintln!(
+                "It still works until you revoke it at \
+                 https://app.put.io/settings/account/oauth/apps"
+            );
+            Ok(())
+        }
+        Err(keyring::Error::NoEntry) => {
+            eprintln!("There was no put.io token in the OS keyring.");
+            Ok(())
+        }
+        Err(e) => Err(e).context("deleting the token from the OS keyring"),
+    }
+}
+
+/// What `--login` and `--logout` are for in a build without keyring support.
+#[cfg(not(feature = "keyring"))]
+const NO_KEYRING: &str = "this putio was built without OS keyring support. Rebuild with \
+                          `cargo install putio --features keyring`, or keep the token in \
+                          `pass`/`gpg`/`op` and use --token-command";
+
+#[cfg(not(feature = "keyring"))]
+pub fn login() -> Result<()> {
+    bail!("{}", NO_KEYRING)
+}
+
+#[cfg(not(feature = "keyring"))]
+pub fn logout() -> Result<()> {
+    bail!("{}", NO_KEYRING)
+}
+
+/// A `--login` that stored a token must be readable by the next run, and a
+/// `--logout` after it must leave nothing behind. Ignored by default: it writes
+/// to the developer's real keyring, and it needs a credential store to exist —
+/// Keychain, Credential Manager, or a running Secret Service provider such as
+/// gnome-keyring or kwallet on Linux, without which it fails with
+/// `NoDefaultStore`. Run it with `cargo test --features keyring -- --ignored`.
+///
+/// The case that matters on a host with no keyring service is covered by the
+/// ordinary tests: [`from_keyring`] returns `None` there, so the chain falls
+/// through to the "no token found" message instead of a D-Bus error.
+#[cfg(feature = "keyring")]
+#[cfg(test)]
+mod keyring_tests {
+    use super::*;
+
+    #[test]
+    #[ignore = "writes to the real OS keyring"]
+    fn round_trip_through_the_keyring() -> Result<()> {
+        let entry = keyring_entry()?;
+        entry.set_password("token_from_keyring")?;
+        let token = from_keyring().expect("the token just stored must be found");
+        assert_eq!(token.expose(), "token_from_keyring");
+        logout()?;
+        assert!(from_keyring().is_none(), "logout must leave nothing behind");
+        Ok(())
+    }
 }
 
 #[cfg(test)]

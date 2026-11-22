@@ -61,7 +61,10 @@ impl FileType {
 #[command(about = "List, download, and clean up files on put.io", long_about = None)]
 pub struct Config {
     /// Parent folder ID on put.io
-    pub parent_id: i64,
+    ///
+    /// Required, except for `--login` and `--logout`, which touch no folder.
+    #[arg(required_unless_present_any = ["login", "logout"])]
+    pub parent_id: Option<i64>,
 
     /// Maximum number of download URLs to output
     #[arg(long)]
@@ -98,12 +101,35 @@ pub struct Config {
     #[arg(long, env = "PUTIO_TOKEN_FILE", value_name = "PATH")]
     pub token_file: Option<PathBuf>,
 
+    /// Store a put.io token in the OS keyring, then exit.
+    ///
+    /// Reads the token from stdin, so `pass putio/token | putio --login`
+    /// keeps it out of shell history. Needs the `keyring` feature.
+    #[arg(long, conflicts_with_all = ["logout", "parent_id"])]
+    pub login: bool,
+
+    /// Delete the put.io token from the OS keyring, then exit.
+    ///
+    /// Deleting is not revoking: the token keeps working until it is revoked
+    /// on put.io. Needs the `keyring` feature.
+    #[arg(long, conflicts_with = "parent_id")]
+    pub logout: bool,
+
     /// OAuth token, found by [`Config::resolve_token`]. Not a flag.
     #[arg(skip)]
     pub oauth_token: Token,
 }
 
 impl Config {
+    /// The folder to act on.
+    ///
+    /// Clap requires `parent_id` unless `--login` or `--logout` was given, and
+    /// [`run`] handles those before anything needs a folder.
+    fn folder_id(&self) -> i64 {
+        self.parent_id
+            .expect("clap requires parent_id outside --login/--logout")
+    }
+
     /// Find the OAuth token, from `--token-command`, `--token-file`,
     /// `$PUTIO_TOKEN` or the default token file, in that order.
     ///
@@ -451,12 +477,25 @@ fn file_url(client: &Client, file_id: i64) -> Result<String> {
     }
 }
 
-/// Entry point. Dispatches to download or cleanup mode based on `config`.
+/// Entry point. Handles the keyring flags, then dispatches to download or
+/// cleanup mode based on `config`.
+///
+/// Token resolution happens here rather than in `main`, so `--login` can run
+/// on a machine that has no token yet.
 ///
 /// # Errors
 ///
-/// Returns any error from the put.io API or local filesystem operations.
-pub fn run(config: Config) -> Result<()> {
+/// Returns any error from token resolution, the put.io API, or local
+/// filesystem operations.
+pub fn run(mut config: Config) -> Result<()> {
+    if config.login {
+        return token::login();
+    }
+    if config.logout {
+        return token::logout();
+    }
+
+    config.resolve_token()?;
     let client = Client::new(&config.oauth_token);
     if !config.delete_type.is_empty() {
         run_cleanup(&config, &client)
@@ -475,7 +514,7 @@ fn run_download(config: &Config, client: &Client) -> Result<()> {
     let downloaded_files = list_dir(path)?;
     let file_type = config.file_type.map(FileType::as_str);
 
-    let files = files_list(client, config.parent_id, config.per_page, file_type)?;
+    let files = files_list(client, config.folder_id(), config.per_page, file_type)?;
     debug!("Total files to process: {}", files.len());
     let mut num_printed: u32 = 0;
 
@@ -519,7 +558,7 @@ fn run_download(config: &Config, client: &Client) -> Result<()> {
 fn run_cleanup(config: &Config, client: &Client) -> Result<()> {
     for delete_type in &config.delete_type {
         let type_name = delete_type.as_str();
-        let files = files_list(client, config.parent_id, config.per_page, Some(type_name))?;
+        let files = files_list(client, config.folder_id(), config.per_page, Some(type_name))?;
         debug!("Cleanup: found {} files of type {}", files.len(), type_name);
         for file in files {
             debug!(
@@ -541,7 +580,8 @@ fn run_cleanup(config: &Config, client: &Client) -> Result<()> {
 /// run unfinished. An empty folder left behind costs nothing and the next run
 /// tries again.
 fn delete_parent_if_empty(client: &Client, file: &File, config: &Config) -> Result<()> {
-    if file.parent_id == config.parent_id || !parent_safe_to_delete(client, file, config.per_page)?
+    if file.parent_id == config.folder_id()
+        || !parent_safe_to_delete(client, file, config.per_page)?
     {
         return Ok(());
     }
@@ -646,8 +686,38 @@ mod tests {
         std::env::remove_var("PUTIO_TOKEN");
         resolved.map_err(|e| e.to_string())?;
         assert_eq!(config.oauth_token.expose(), "test_token_from_env");
-        assert_eq!(config.parent_id, 921234);
+        assert_eq!(config.parent_id, Some(921234));
         Ok(())
+    }
+
+    /// `--login` and `--logout` are the only ways to run without a folder id.
+    #[test]
+    fn config_login_needs_no_parent_id() -> Result<(), String> {
+        let config = Config::try_parse_from(["putio", "--login"]).map_err(|e| e.to_string())?;
+        assert!(config.login);
+        assert_eq!(config.parent_id, None);
+        Ok(())
+    }
+
+    #[test]
+    fn config_logout_needs_no_parent_id() -> Result<(), String> {
+        let config = Config::try_parse_from(["putio", "--logout"]).map_err(|e| e.to_string())?;
+        assert!(config.logout);
+        Ok(())
+    }
+
+    #[test]
+    fn config_login_and_logout_conflict() {
+        let result = Config::try_parse_from(["putio", "--login", "--logout"]);
+        assert!(result.is_err());
+    }
+
+    /// A folder id alongside `--login` means the two were confused for each
+    /// other; refusing beats listing a folder the user did not mean.
+    #[test]
+    fn config_login_rejects_a_parent_id() {
+        let result = Config::try_parse_from(["putio", "--login", "921234"]);
+        assert!(result.is_err());
     }
 
     /// A token command is the recommended source: it keeps the secret in
