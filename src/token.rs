@@ -130,7 +130,7 @@ fn no_token_help() -> String {
          \x20 --token-command CMD   ($PUTIO_TOKEN_COMMAND), e.g. --token-command 'pass putio/token'\n\
          \x20 --token-file PATH     ($PUTIO_TOKEN_FILE)\n\
          \x20 $PUTIO_TOKEN\n\
-         \x20 {default_path}       (mode 0600){keyring}\n\
+         \x20 {default_path} (mode 0600){keyring}\n\
          Get a token from https://app.put.io/settings/account/oauth/apps"
     )
 }

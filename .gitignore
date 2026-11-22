@@ -1,3 +1,10 @@
 /target
 **/*.rs.bk
 .claude/
+
+# A put.io token is a full-account credential. Nothing holding one should be
+# committable by accident.
+.env
+.env.*
+*.token
+completed/

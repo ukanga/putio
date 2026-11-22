@@ -35,3 +35,11 @@ jobs:
 
       - name: Run tests
         run: cargo test --locked
+
+      # The keyring feature is off by default, so without this it would rot
+      # unnoticed: nothing else here ever compiles that code path.
+      - name: Run clippy with the keyring feature
+        run: cargo clippy --locked --all-targets --features keyring -- -D warnings
+
+      - name: Run tests with the keyring feature
+        run: cargo test --locked --features keyring
