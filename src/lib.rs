@@ -121,6 +121,13 @@ impl Config {
             token::resolve(self.token_command.as_deref(), self.token_file.as_deref())?;
         Ok(())
     }
+
+    fn ensure_token(&mut self) -> Result<()> {
+        if self.oauth_token.is_empty() {
+            self.resolve_token()?;
+        }
+        Ok(())
+    }
 }
 
 struct Client {
@@ -461,7 +468,7 @@ pub fn run(mut config: Config) -> Result<()> {
         return token::logout();
     }
 
-    config.resolve_token()?;
+    config.ensure_token()?;
     let client = Client::new(&config.oauth_token);
     if !config.delete_type.is_empty() {
         run_cleanup(&config, &client)
@@ -786,6 +793,34 @@ mod tests {
         let _ = fs::remove_dir_all(&config_home);
         resolved.map_err(|e| e.to_string())?;
         assert_eq!(config.oauth_token.expose(), "token_from_default_file");
+        Ok(())
+    }
+
+    #[test]
+    fn ensure_token_keeps_a_token_the_caller_already_set() -> Result<(), String> {
+        let _guard = ENV_LOCK.lock().unwrap();
+        clear_token_env();
+        std::env::set_var("PUTIO_TOKEN", "token_from_env");
+        let mut config = Config::try_parse_from(["putio", "921234"]).map_err(|e| e.to_string())?;
+        config.oauth_token =
+            Token::parse("token_from_the_caller", "a test").map_err(|e| e.to_string())?;
+        let ensured = config.ensure_token();
+        std::env::remove_var("PUTIO_TOKEN");
+        ensured.map_err(|e| e.to_string())?;
+        assert_eq!(config.oauth_token.expose(), "token_from_the_caller");
+        Ok(())
+    }
+
+    #[test]
+    fn ensure_token_resolves_when_the_caller_set_none() -> Result<(), String> {
+        let _guard = ENV_LOCK.lock().unwrap();
+        clear_token_env();
+        std::env::set_var("PUTIO_TOKEN", "token_from_env");
+        let mut config = Config::try_parse_from(["putio", "921234"]).map_err(|e| e.to_string())?;
+        let ensured = config.ensure_token();
+        std::env::remove_var("PUTIO_TOKEN");
+        ensured.map_err(|e| e.to_string())?;
+        assert_eq!(config.oauth_token.expose(), "token_from_env");
         Ok(())
     }
 
