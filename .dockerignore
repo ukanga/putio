@@ -2,3 +2,8 @@ Dockerfile
 .git
 .github
 target
+.claude
+.env
+.env.*
+*.token
+completed

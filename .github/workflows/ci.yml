@@ -35,3 +35,9 @@ jobs:
 
       - name: Run tests
         run: cargo test --locked
+
+      - name: Run clippy with the keyring feature
+        run: cargo clippy --locked --all-targets --features keyring -- -D warnings
+
+      - name: Run tests with the keyring feature
+        run: cargo test --locked --features keyring

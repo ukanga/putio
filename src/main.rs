@@ -6,7 +6,5 @@ use putio::Config;
 fn main() -> Result<()> {
     env_logger::init();
 
-    let mut config = Config::parse();
-    config.resolve_token()?;
-    run(config)
+    run(Config::parse())
 }

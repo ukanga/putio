@@ -1,3 +1,7 @@
 /target
 **/*.rs.bk
 .claude/
+.env
+.env.*
+*.token
+completed/

@@ -6,7 +6,11 @@ use serde_json::json;
 use std::fs;
 use std::io;
 use std::io::Write;
-use std::path::Path;
+use std::path::{Path, PathBuf};
+
+mod token;
+
+pub use token::Token;
 
 /// A put.io file type, as reported by the API and accepted by `--file-type`
 /// and `--delete-type`.
@@ -48,15 +52,16 @@ impl FileType {
 
 /// Command-line configuration for the put.io tool.
 ///
-/// `parent_id` is required and positional. The OAuth token is read from the
-/// `PUTIO_TOKEN` environment variable in [`Config::resolve_token`].
+/// `parent_id` is required and positional. The OAuth token is not a flag; it
+/// is found by [`Config::resolve_token`].
 #[derive(Parser, Debug)]
 // long_about = None keeps the rustdoc above out of --help, which is written for
 // someone running the binary, not reading the crate.
 #[command(about = "List, download, and clean up files on put.io", long_about = None)]
 pub struct Config {
     /// Parent folder ID on put.io
-    pub parent_id: i64,
+    #[arg(required_unless_present_any = ["login", "logout"])]
+    pub parent_id: Option<i64>,
 
     /// Maximum number of download URLs to output
     #[arg(long)]
@@ -78,37 +83,62 @@ pub struct Config {
     #[arg(long, value_enum, ignore_case = true, conflicts_with = "file_type")]
     pub delete_type: Vec<FileType>,
 
-    /// OAuth token, populated from the `PUTIO_TOKEN` environment variable.
+    /// Shell command printing the put.io OAuth token, e.g. 'pass putio/token'
+    #[arg(long, env = "PUTIO_TOKEN_COMMAND", value_name = "CMD")]
+    pub token_command: Option<String>,
+
+    /// File holding the put.io OAuth token, mode 0600
+    #[arg(long, env = "PUTIO_TOKEN_FILE", value_name = "PATH")]
+    pub token_file: Option<PathBuf>,
+
+    /// Store the put.io OAuth token read from stdin in the OS keyring, then exit
+    #[arg(long, conflicts_with_all = ["logout", "parent_id"])]
+    pub login: bool,
+
+    /// Delete the put.io OAuth token from the OS keyring, then exit
+    #[arg(long, conflicts_with = "parent_id")]
+    pub logout: bool,
+
     #[arg(skip)]
-    pub oauth_token: String,
+    pub oauth_token: Token,
 }
 
 impl Config {
-    /// Resolve the OAuth token from the `PUTIO_TOKEN` environment variable.
+    fn folder_id(&self) -> i64 {
+        self.parent_id
+            .expect("clap requires parent_id outside --login/--logout")
+    }
+
+    /// Find the OAuth token. See [`token::resolve`] for the sources and their
+    /// order.
     ///
     /// # Errors
     ///
-    /// Returns an error if `PUTIO_TOKEN` is unset or empty.
+    /// Returns an error if no source yields a usable token, or if a source the
+    /// caller named explicitly fails.
     pub fn resolve_token(&mut self) -> Result<()> {
-        match std::env::var("PUTIO_TOKEN") {
-            Ok(token) if !token.is_empty() => {
-                self.oauth_token = token;
-                Ok(())
-            }
-            _ => bail!("PUTIO_TOKEN environment variable is required"),
+        self.oauth_token =
+            token::resolve(self.token_command.as_deref(), self.token_file.as_deref())?;
+        Ok(())
+    }
+
+    fn ensure_token(&mut self) -> Result<()> {
+        if self.oauth_token.is_empty() {
+            self.resolve_token()?;
         }
+        Ok(())
     }
 }
 
 struct Client {
-    oauth_token: String,
+    oauth_token: Token,
 }
 
 impl Client {
-    pub fn new(oauth_token: &str) -> Client {
-        let oauth_token = oauth_token.to_owned();
-
-        Client { oauth_token }
+    pub fn new(oauth_token: &Token) -> Client {
+        Client {
+            oauth_token: oauth_token.clone(),
+        }
     }
 
     pub fn get(&self, url: &str) -> Result<reqwest::blocking::RequestBuilder> {
@@ -223,13 +253,13 @@ fn get_access_token_header(access_token: &str) -> String {
     format!("Token {}", access_token)
 }
 
-fn get_authorization_header(oauth_token: &str) -> Result<reqwest::header::HeaderMap> {
-    let token = get_access_token_header(oauth_token);
+fn get_authorization_header(oauth_token: &Token) -> Result<reqwest::header::HeaderMap> {
+    let token = get_access_token_header(oauth_token.expose());
     let mut headers = reqwest::header::HeaderMap::with_capacity(1);
-    headers.insert(
-        reqwest::header::AUTHORIZATION,
-        reqwest::header::HeaderValue::from_str(&token)?,
-    );
+    let mut value = reqwest::header::HeaderValue::from_str(&token)
+        .context("the put.io token cannot be sent in an HTTP header")?;
+    value.set_sensitive(true);
+    headers.insert(reqwest::header::AUTHORIZATION, value);
 
     Ok(headers)
 }
@@ -423,12 +453,22 @@ fn file_url(client: &Client, file_id: i64) -> Result<String> {
     }
 }
 
-/// Entry point. Dispatches to download or cleanup mode based on `config`.
+/// Entry point. Handles the keyring flags, then dispatches to download or
+/// cleanup mode based on `config`.
 ///
 /// # Errors
 ///
-/// Returns any error from the put.io API or local filesystem operations.
-pub fn run(config: Config) -> Result<()> {
+/// Returns any error from token resolution, the put.io API, or local
+/// filesystem operations.
+pub fn run(mut config: Config) -> Result<()> {
+    if config.login {
+        return token::login();
+    }
+    if config.logout {
+        return token::logout();
+    }
+
+    config.ensure_token()?;
     let client = Client::new(&config.oauth_token);
     if !config.delete_type.is_empty() {
         run_cleanup(&config, &client)
@@ -447,7 +487,7 @@ fn run_download(config: &Config, client: &Client) -> Result<()> {
     let downloaded_files = list_dir(path)?;
     let file_type = config.file_type.map(FileType::as_str);
 
-    let files = files_list(client, config.parent_id, config.per_page, file_type)?;
+    let files = files_list(client, config.folder_id(), config.per_page, file_type)?;
     debug!("Total files to process: {}", files.len());
     let mut num_printed: u32 = 0;
 
@@ -491,7 +531,7 @@ fn run_download(config: &Config, client: &Client) -> Result<()> {
 fn run_cleanup(config: &Config, client: &Client) -> Result<()> {
     for delete_type in &config.delete_type {
         let type_name = delete_type.as_str();
-        let files = files_list(client, config.parent_id, config.per_page, Some(type_name))?;
+        let files = files_list(client, config.folder_id(), config.per_page, Some(type_name))?;
         debug!("Cleanup: found {} files of type {}", files.len(), type_name);
         for file in files {
             debug!(
@@ -513,7 +553,8 @@ fn run_cleanup(config: &Config, client: &Client) -> Result<()> {
 /// run unfinished. An empty folder left behind costs nothing and the next run
 /// tries again.
 fn delete_parent_if_empty(client: &Client, file: &File, config: &Config) -> Result<()> {
-    if file.parent_id == config.parent_id || !parent_safe_to_delete(client, file, config.per_page)?
+    if file.parent_id == config.folder_id()
+        || !parent_safe_to_delete(client, file, config.per_page)?
     {
         return Ok(());
     }
@@ -571,9 +612,19 @@ mod tests {
     use super::*;
     use std::sync::Mutex;
 
-    // Serialize tests that mutate the PUTIO_TOKEN env var so cargo's parallel
-    // test runner can't race set/remove against another test's read.
+    // Serialize tests that mutate the environment the token chain reads, so
+    // cargo's parallel test runner can't race a set/remove against another
+    // test's read.
     static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    /// Stops a test picking up a real token from the developer's environment.
+    /// Caller holds `ENV_LOCK`.
+    fn clear_token_env() {
+        std::env::remove_var("PUTIO_TOKEN");
+        std::env::remove_var("PUTIO_TOKEN_COMMAND");
+        std::env::remove_var("PUTIO_TOKEN_FILE");
+        std::env::set_var("XDG_CONFIG_HOME", "/nonexistent-putio-test-config");
+    }
 
     #[test]
     fn config_missing_parent_id() {
@@ -582,24 +633,228 @@ mod tests {
     }
 
     #[test]
-    fn config_resolve_token_missing_env() {
+    fn config_resolve_token_no_source_lists_every_source() {
         let _guard = ENV_LOCK.lock().unwrap();
-        std::env::remove_var("PUTIO_TOKEN");
+        clear_token_env();
         let mut config = Config::try_parse_from(["putio", "921234"]).expect("parse");
-        let result = config.resolve_token();
-        assert!(result.is_err());
+        let err = config.resolve_token().expect_err("no token is an error");
+        let msg = err.to_string();
+        assert!(msg.contains("--token-command"), "{}", msg);
+        assert!(msg.contains("--token-file"), "{}", msg);
+        assert!(msg.contains("PUTIO_TOKEN"), "{}", msg);
     }
 
     #[test]
     fn config_resolve_token_from_env() -> Result<(), String> {
         let _guard = ENV_LOCK.lock().unwrap();
+        clear_token_env();
         std::env::set_var("PUTIO_TOKEN", "test_token_from_env");
         let mut config = Config::try_parse_from(["putio", "921234"]).map_err(|e| e.to_string())?;
         let resolved = config.resolve_token();
         std::env::remove_var("PUTIO_TOKEN");
         resolved.map_err(|e| e.to_string())?;
-        assert_eq!(config.oauth_token, "test_token_from_env");
-        assert_eq!(config.parent_id, 921234);
+        assert_eq!(config.oauth_token.expose(), "test_token_from_env");
+        assert_eq!(config.parent_id, Some(921234));
+        Ok(())
+    }
+
+    #[test]
+    fn config_login_needs_no_parent_id() -> Result<(), String> {
+        let config = Config::try_parse_from(["putio", "--login"]).map_err(|e| e.to_string())?;
+        assert!(config.login);
+        assert_eq!(config.parent_id, None);
+        Ok(())
+    }
+
+    #[test]
+    fn config_logout_needs_no_parent_id() -> Result<(), String> {
+        let config = Config::try_parse_from(["putio", "--logout"]).map_err(|e| e.to_string())?;
+        assert!(config.logout);
+        Ok(())
+    }
+
+    #[test]
+    fn config_login_and_logout_conflict() {
+        let result = Config::try_parse_from(["putio", "--login", "--logout"]);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn config_login_rejects_a_parent_id() {
+        let result = Config::try_parse_from(["putio", "--login", "921234"]);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn config_resolve_token_from_command() -> Result<(), String> {
+        let _guard = ENV_LOCK.lock().unwrap();
+        clear_token_env();
+        let mut config = Config::try_parse_from([
+            "putio",
+            "921234",
+            "--token-command",
+            "echo token_from_command",
+        ])
+        .map_err(|e| e.to_string())?;
+        config.resolve_token().map_err(|e| e.to_string())?;
+        assert_eq!(config.oauth_token.expose(), "token_from_command");
+        Ok(())
+    }
+
+    #[test]
+    fn config_resolve_token_failing_command_does_not_fall_back_to_env() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        clear_token_env();
+        std::env::set_var("PUTIO_TOKEN", "token_from_env");
+        let mut config = Config::try_parse_from(["putio", "921234", "--token-command", "exit 3"])
+            .expect("parse");
+        let result = config.resolve_token();
+        std::env::remove_var("PUTIO_TOKEN");
+        let err = result.expect_err("a failing token command is an error");
+        assert!(err.to_string().contains("exit status 3"), "{}", err);
+    }
+
+    #[test]
+    fn config_resolve_token_command_beats_env() -> Result<(), String> {
+        let _guard = ENV_LOCK.lock().unwrap();
+        clear_token_env();
+        std::env::set_var("PUTIO_TOKEN", "token_from_env");
+        let mut config = Config::try_parse_from([
+            "putio",
+            "921234",
+            "--token-command",
+            "echo token_from_command",
+        ])
+        .map_err(|e| e.to_string())?;
+        let resolved = config.resolve_token();
+        std::env::remove_var("PUTIO_TOKEN");
+        resolved.map_err(|e| e.to_string())?;
+        assert_eq!(config.oauth_token.expose(), "token_from_command");
+        Ok(())
+    }
+
+    #[test]
+    fn config_resolve_token_from_file() -> Result<(), String> {
+        let _guard = ENV_LOCK.lock().unwrap();
+        clear_token_env();
+        let path = write_token_file("from_file", "token_from_file\n", 0o600)?;
+        let mut config = Config::try_parse_from([
+            "putio",
+            "921234",
+            "--token-file",
+            &path.display().to_string(),
+        ])
+        .map_err(|e| e.to_string())?;
+        let resolved = config.resolve_token();
+        let _ = fs::remove_file(&path);
+        resolved.map_err(|e| e.to_string())?;
+        assert_eq!(config.oauth_token.expose(), "token_from_file");
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn config_resolve_token_rejects_a_world_readable_file() -> Result<(), String> {
+        let _guard = ENV_LOCK.lock().unwrap();
+        clear_token_env();
+        let path = write_token_file("world_readable", "token_from_file\n", 0o644)?;
+        let mut config = Config::try_parse_from([
+            "putio",
+            "921234",
+            "--token-file",
+            &path.display().to_string(),
+        ])
+        .map_err(|e| e.to_string())?;
+        let result = config.resolve_token();
+        let _ = fs::remove_file(&path);
+        let err = result.expect_err("a 0644 token file must be refused");
+        assert!(err.to_string().contains("chmod 600"), "{}", err);
+        Ok(())
+    }
+
+    #[test]
+    fn config_resolve_token_from_the_default_file() -> Result<(), String> {
+        let _guard = ENV_LOCK.lock().unwrap();
+        clear_token_env();
+        let config_home = std::env::temp_dir().join(format!(
+            "putio-test-xdg-{}-{}",
+            std::process::id(),
+            "default"
+        ));
+        let dir = config_home.join("putio");
+        fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+        let path = dir.join("token");
+        fs::write(&path, "token_from_default_file\n").map_err(|e| e.to_string())?;
+        set_mode(&path, 0o600)?;
+        std::env::set_var("XDG_CONFIG_HOME", &config_home);
+
+        let mut config = Config::try_parse_from(["putio", "921234"]).map_err(|e| e.to_string())?;
+        let resolved = config.resolve_token();
+        let _ = fs::remove_dir_all(&config_home);
+        resolved.map_err(|e| e.to_string())?;
+        assert_eq!(config.oauth_token.expose(), "token_from_default_file");
+        Ok(())
+    }
+
+    #[test]
+    fn ensure_token_keeps_a_token_the_caller_already_set() -> Result<(), String> {
+        let _guard = ENV_LOCK.lock().unwrap();
+        clear_token_env();
+        std::env::set_var("PUTIO_TOKEN", "token_from_env");
+        let mut config = Config::try_parse_from(["putio", "921234"]).map_err(|e| e.to_string())?;
+        config.oauth_token =
+            Token::parse("token_from_the_caller", "a test").map_err(|e| e.to_string())?;
+        let ensured = config.ensure_token();
+        std::env::remove_var("PUTIO_TOKEN");
+        ensured.map_err(|e| e.to_string())?;
+        assert_eq!(config.oauth_token.expose(), "token_from_the_caller");
+        Ok(())
+    }
+
+    #[test]
+    fn ensure_token_resolves_when_the_caller_set_none() -> Result<(), String> {
+        let _guard = ENV_LOCK.lock().unwrap();
+        clear_token_env();
+        std::env::set_var("PUTIO_TOKEN", "token_from_env");
+        let mut config = Config::try_parse_from(["putio", "921234"]).map_err(|e| e.to_string())?;
+        let ensured = config.ensure_token();
+        std::env::remove_var("PUTIO_TOKEN");
+        ensured.map_err(|e| e.to_string())?;
+        assert_eq!(config.oauth_token.expose(), "token_from_env");
+        Ok(())
+    }
+
+    #[test]
+    fn config_debug_does_not_leak_the_token() -> Result<(), String> {
+        let _guard = ENV_LOCK.lock().unwrap();
+        clear_token_env();
+        std::env::set_var("PUTIO_TOKEN", "sup3rs3cret");
+        let mut config = Config::try_parse_from(["putio", "921234"]).map_err(|e| e.to_string())?;
+        let resolved = config.resolve_token();
+        std::env::remove_var("PUTIO_TOKEN");
+        resolved.map_err(|e| e.to_string())?;
+        let debug = format!("{:?}", config);
+        assert!(!debug.contains("sup3rs3cret"), "{}", debug);
+        assert!(debug.contains("Token(***)"), "{}", debug);
+        Ok(())
+    }
+
+    fn write_token_file(name: &str, contents: &str, mode: u32) -> Result<PathBuf, String> {
+        let path =
+            std::env::temp_dir().join(format!("putio-test-token-{}-{}", std::process::id(), name));
+        fs::write(&path, contents).map_err(|e| e.to_string())?;
+        set_mode(&path, mode)?;
+        Ok(path)
+    }
+
+    #[cfg(unix)]
+    fn set_mode(path: &Path, mode: u32) -> Result<(), String> {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(path, fs::Permissions::from_mode(mode)).map_err(|e| e.to_string())
+    }
+
+    #[cfg(not(unix))]
+    fn set_mode(_path: &Path, _mode: u32) -> Result<(), String> {
         Ok(())
     }
 
