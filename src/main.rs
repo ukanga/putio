@@ -1,20 +1,12 @@
-use std::process;
-
+use anyhow::Result;
 use clap::Parser;
 use putio::run;
 use putio::Config;
 
-fn main() {
+fn main() -> Result<()> {
     env_logger::init();
 
     let mut config = Config::parse();
-    if let Err(err) = config.resolve_token() {
-        eprintln!("Problem parsing arguments: {}", err);
-        process::exit(1);
-    }
-
-    if let Err(err) = run(config) {
-        eprintln!("Error: {}", err);
-        process::exit(1);
-    }
+    config.resolve_token()?;
+    run(config)
 }

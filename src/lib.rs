@@ -1,23 +1,12 @@
+use anyhow::{anyhow, bail, Result};
 use clap::{Parser, ValueEnum};
 use log::{debug, warn};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
-use std::error::Error;
-use std::fmt;
 use std::fs;
 use std::io;
 use std::io::Write;
 use std::path::Path;
-
-#[derive(Debug)]
-struct PutioError(String);
-
-impl fmt::Display for PutioError {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(f, "putio error: {}", self.0)
-    }
-}
-impl Error for PutioError {}
 
 /// A put.io file type, as reported by the API and accepted by `--file-type`
 /// and `--delete-type`.
@@ -100,13 +89,13 @@ impl Config {
     /// # Errors
     ///
     /// Returns an error if `PUTIO_TOKEN` is unset or empty.
-    pub fn resolve_token(&mut self) -> Result<(), &'static str> {
+    pub fn resolve_token(&mut self) -> Result<()> {
         match std::env::var("PUTIO_TOKEN") {
             Ok(token) if !token.is_empty() => {
                 self.oauth_token = token;
                 Ok(())
             }
-            _ => Err("PUTIO_TOKEN environment variable is required"),
+            _ => bail!("PUTIO_TOKEN environment variable is required"),
         }
     }
 }
@@ -122,14 +111,14 @@ impl Client {
         Client { oauth_token }
     }
 
-    pub fn get(&self, url: &str) -> Result<reqwest::blocking::RequestBuilder, Box<dyn Error>> {
+    pub fn get(&self, url: &str) -> Result<reqwest::blocking::RequestBuilder> {
         let client = reqwest::blocking::Client::new();
         let headers = get_authorization_header(&self.oauth_token)?;
 
         Ok(client.get(url).headers(headers))
     }
 
-    pub fn post(&self, url: &str) -> Result<reqwest::blocking::RequestBuilder, Box<dyn Error>> {
+    pub fn post(&self, url: &str) -> Result<reqwest::blocking::RequestBuilder> {
         let client = reqwest::blocking::Client::new();
         let headers = get_authorization_header(&self.oauth_token)?;
 
@@ -150,12 +139,12 @@ const RETRY_BASE_DELAY_MS: u64 = 500;
 /// callers keep their existing status handling.
 fn send_with_retry(
     builder: reqwest::blocking::RequestBuilder,
-) -> Result<reqwest::blocking::Response, Box<dyn Error>> {
+) -> Result<reqwest::blocking::Response> {
     let mut attempt: u32 = 0;
     loop {
         let attempt_builder = builder
             .try_clone()
-            .ok_or_else(|| PutioError("request is not cloneable, cannot retry".to_string()))?;
+            .ok_or_else(|| anyhow!("request is not cloneable, cannot retry"))?;
         match attempt_builder.send() {
             Ok(response) => {
                 let status = response.status();
@@ -188,7 +177,7 @@ fn send_with_retry(
                 std::thread::sleep(std::time::Duration::from_millis(delay));
                 attempt += 1;
             }
-            Err(e) => return Err(Box::new(e)),
+            Err(e) => return Err(e.into()),
         }
     }
 }
@@ -232,9 +221,7 @@ fn get_access_token_header(access_token: &str) -> String {
     format!("Token {}", access_token)
 }
 
-fn get_authorization_header(
-    oauth_token: &str,
-) -> Result<reqwest::header::HeaderMap, Box<dyn Error>> {
+fn get_authorization_header(oauth_token: &str) -> Result<reqwest::header::HeaderMap> {
     let token = get_access_token_header(oauth_token);
     let mut headers = reqwest::header::HeaderMap::with_capacity(1);
     headers.insert(
@@ -245,7 +232,7 @@ fn get_authorization_header(
     Ok(headers)
 }
 
-fn list_dir(dir: &Path) -> io::Result<Vec<String>> {
+fn list_dir(dir: &Path) -> Result<Vec<String>> {
     let mut all_files: Vec<String> = Vec::new();
     let mut files: Vec<String> = Vec::new();
     if dir.is_dir() {
@@ -276,7 +263,7 @@ fn list_dir(dir: &Path) -> io::Result<Vec<String>> {
 /// moves the local copy away once put.io confirms its copy is gone. A 404, or a
 /// `FileNotFound` body under any status, counts as deleted, so a delete retried
 /// after an earlier run removed the file does not fail forever.
-fn delete_file(client: &Client, file_id: i64) -> Result<(), Box<dyn Error>> {
+fn delete_file(client: &Client, file_id: i64) -> Result<()> {
     let url = "https://api.put.io/v2/files/delete".to_string();
     let body = json!({ "file_ids": file_id }).to_string();
     let response = send_with_retry(
@@ -303,7 +290,7 @@ fn delete_outcome(
     file_id: i64,
     status: reqwest::StatusCode,
     error: Option<ApiError>,
-) -> Result<(), Box<dyn Error>> {
+) -> Result<()> {
     let already_gone = status == reqwest::StatusCode::NOT_FOUND
         || error
             .as_ref()
@@ -320,10 +307,7 @@ fn delete_outcome(
     let error_msg = error
         .and_then(|e| e.error_message)
         .unwrap_or_else(|| format!("HTTP {}", status));
-    Err(Box::new(PutioError(format!(
-        "Error deleting file_id={}: {}",
-        file_id, error_msg
-    ))))
+    bail!("Error deleting file_id={}: {}", file_id, error_msg)
 }
 
 /// The `error_message` put.io returned for a failed request, or the status
@@ -343,7 +327,7 @@ fn fetch_files_page(
     parent_id: i64,
     per_page: i8,
     file_type: Option<&str>,
-) -> Result<Vec<File>, Box<dyn Error>> {
+) -> Result<Vec<File>> {
     let mut url = format!(
         "https://api.put.io/v2/files/list?parent_id={}&per_page={}",
         parent_id, per_page
@@ -371,11 +355,11 @@ fn fetch_files_page(
             "files_list failed for parent_id={}: HTTP {}",
             parent_id, status
         );
-        Err(Box::new(PutioError(format!(
+        bail!(
             "Error listing files for parent_id={}: {}",
             parent_id,
             api_error_message(response, status)
-        ))))
+        )
     }
 }
 
@@ -389,7 +373,7 @@ fn files_list(
     parent_id: i64,
     per_page: i8,
     file_type: Option<&str>,
-) -> Result<Vec<File>, Box<dyn Error>> {
+) -> Result<Vec<File>> {
     let mut files: Vec<File> = Vec::new();
 
     if let Some(ft) = file_type {
@@ -418,7 +402,7 @@ fn files_list(
     Ok(files)
 }
 
-fn file_url(client: &Client, file_id: i64) -> Result<String, Box<dyn Error>> {
+fn file_url(client: &Client, file_id: i64) -> Result<String> {
     let url = format!("https://api.put.io/v2/files/{}/url", file_id);
     debug!("Fetching download URL for file_id={}", file_id);
     let response = send_with_retry(client.get(&url)?)?;
@@ -429,11 +413,11 @@ fn file_url(client: &Client, file_id: i64) -> Result<String, Box<dyn Error>> {
     } else {
         let status = response.status();
         debug!("file_url failed for file_id={}: HTTP {}", file_id, status);
-        Err(Box::new(PutioError(format!(
+        bail!(
             "Error fetching download url for file_id={}: {}",
             file_id,
             api_error_message(response, status)
-        ))))
+        )
     }
 }
 
@@ -442,7 +426,7 @@ fn file_url(client: &Client, file_id: i64) -> Result<String, Box<dyn Error>> {
 /// # Errors
 ///
 /// Returns any error from the put.io API or local filesystem operations.
-pub fn run(config: Config) -> Result<(), Box<dyn Error>> {
+pub fn run(config: Config) -> Result<()> {
     let client = Client::new(&config.oauth_token);
     if !config.delete_type.is_empty() {
         run_cleanup(&config, &client)
@@ -454,7 +438,7 @@ pub fn run(config: Config) -> Result<(), Box<dyn Error>> {
 /// Download mode: list files (optionally filtered by `--file-type`), print
 /// download URLs for files not yet on disk, and clean up files that have
 /// already been downloaded locally.
-fn run_download(config: &Config, client: &Client) -> Result<(), Box<dyn Error>> {
+fn run_download(config: &Config, client: &Client) -> Result<()> {
     let stdout = io::stdout();
     let mut handle = stdout.lock();
     let path = Path::new(".");
@@ -500,7 +484,7 @@ fn run_download(config: &Config, client: &Client) -> Result<(), Box<dyn Error>> 
 
 /// Cleanup mode: for each `--delete-type`, list matching files on put.io
 /// and delete them. Empty parent folders are removed when safe.
-fn run_cleanup(config: &Config, client: &Client) -> Result<(), Box<dyn Error>> {
+fn run_cleanup(config: &Config, client: &Client) -> Result<()> {
     for delete_type in &config.delete_type {
         let type_name = delete_type.as_str();
         let files = files_list(client, config.parent_id, config.per_page, Some(type_name))?;
@@ -524,11 +508,7 @@ fn run_cleanup(config: &Config, client: &Client) -> Result<(), Box<dyn Error>> {
 /// succeeded, so aborting here would leave the file gone from put.io with the
 /// run unfinished. An empty folder left behind costs nothing and the next run
 /// tries again.
-fn delete_parent_if_empty(
-    client: &Client,
-    file: &File,
-    config: &Config,
-) -> Result<(), Box<dyn Error>> {
+fn delete_parent_if_empty(client: &Client, file: &File, config: &Config) -> Result<()> {
     if file.parent_id == config.parent_id || !parent_safe_to_delete(client, file, config.per_page)?
     {
         return Ok(());
@@ -546,11 +526,7 @@ fn delete_parent_if_empty(
     Ok(())
 }
 
-fn parent_safe_to_delete(
-    client: &Client,
-    file: &File,
-    per_page: i8,
-) -> Result<bool, Box<dyn Error>> {
+fn parent_safe_to_delete(client: &Client, file: &File, per_page: i8) -> Result<bool> {
     debug!(
         "Checking if parent {} is safe to delete (file: {})",
         file.parent_id, file.name
