@@ -224,7 +224,6 @@ struct File {
 #[derive(Serialize, Deserialize, Debug)]
 struct Files {
     files: Vec<File>,
-    parent: File,
     status: String,
     total: i32,
 }
@@ -754,6 +753,18 @@ mod tests {
         let json = r#"{"status":"OK","url":"https://example.com/download"}"#;
         let file_url: FileURL = serde_json::from_str(json).unwrap();
         assert_eq!(file_url.url, "https://example.com/download");
+    }
+
+    // The root folder has no parent, so put.io answers a parent_id=0 listing
+    // with a parent object whose every field is null.
+    #[test]
+    fn files_deserialize_root_listing() {
+        let json = r#"{"files":[],"parent":{"content_type":null,"file_type":null,
+            "id":null,"name":null,"parent_id":null,"size":null},
+            "status":"OK","total":0}"#;
+        let files: Files = serde_json::from_str(json).unwrap();
+        assert!(files.files.is_empty());
+        assert_eq!(files.status, "OK");
     }
 
     #[test]
